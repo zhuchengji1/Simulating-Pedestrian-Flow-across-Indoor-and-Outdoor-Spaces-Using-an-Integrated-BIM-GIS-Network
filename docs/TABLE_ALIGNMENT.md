@@ -10,4 +10,5 @@ The files in `results/published_tables/` were transcribed from the displayed val
 | `Table_07_Likelihood_Ratio_Comparison_of_Power_Law_and_Power_Law_with_Exponential_Cutoff.csv` | Table 7 | Uses the manuscript's LR direction: PL with cutoff minus power law. |
 | `Table_08_Power_Law_with_Exponential_Cutoff_Parameter_Estimates_and_Goodness_of_Fit.csv` | Table 8 | Uses the manuscript's displayed alpha, lambda times 10^-4, and p_GOF values. |
 
-The label `Hybrid` is used consistently with the manuscript. The files do not expose the underlying restricted network, trajectory, or raw flow data.
+The label `Hybrid` is used consistently with the manuscript. The published tables do not expose the underlying restricted network, trajectories, or spatially identifiable flow data. The repository separately provides anonymized Random passage-flow values without segment identifiers or network attributes.
+
