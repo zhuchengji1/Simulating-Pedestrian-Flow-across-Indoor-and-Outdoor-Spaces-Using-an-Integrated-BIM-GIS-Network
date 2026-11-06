@@ -1,0 +1,2628 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 3D 7.0.4" snapToGrid="true">
+  <code><![CDATA[; Includes table extension (for tracking node IDs)
+; Includes nw extension (for building network G)
+; Includes csv extension (for reading new CSV format)
+extensions [table nw csv]
+
+; ----------------------------------------------------------------------
+; ;; --- A. Global Variables and Agent Definitions --- ;;
+; ----------------------------------------------------------------------
+
+globals [
+  ; Primary analysis unit: Road_ID, termed formal_segment_id internally.
+  formal-segment-footprint-flow-table
+  formal-segment-passage-flow-table
+  formal-segment-lower-link-count-table
+  formal-segment-metric-table
+  formal-segment-space-table
+  formal-segment-ids-list
+  correlation-footprint-pearson-rows
+  correlation-passage-pearson-rows
+  raw-edge-data
+  node-id-to-turtle-table
+  property-names
+
+  ; Store all trajectory data read from CSV
+  all-trajectory-data
+
+  ; Store R-Square / Rho result string
+  R-Square-String
+  R-Square-String-Area0
+  R-Square-String-Selected 
+  
+  ; 用于系统稳态判定的状态记忆变量
+  previous-flow-proportions
+  previous-entropy
+  stable-counter
+  current-metric-value ; 用来锁住真实的指标数值，防止停止后跳动
+
+  ; [新增] 用于存储 Purposive OD 模式的区域宏观认知数据
+  area-types-list          ; 存储所有有效的 area_type 列表
+  area-centers-table       ; table: key = area_type, value = [center-x center-y]
+  area-nearpoi-table       ; table: key = area_type, value = [近邻 area_type 列表]
+  area-farpoi-table        ; table: key = area_type, value = [远邻 area_type 列表]
+
+  ; [Interface Globals Reminder]
+  ; movement-mode (Chooser) <--- "Simulated", "Random OD", "Purposive OD"
+  ; path-calculation-mode (Chooser) <--- 选项: "Distance", "Angular", "Topological", "Hybrid"
+  ; analysis-metric (Chooser)
+  ; correlation-method (Chooser)
+  ; selected-area-name (Chooser) 
+  ; stopping-condition (Chooser) <--- 选项: "None", "RMSE", "Shannon Entropy", "Correlation_BtCn", "Correlation_WPR"
+]
+
+links-own [
+  ; --- 基础标识与空间映射（严格对齐你的新CSV） ---
+  lower-link-id     ; 对应你的 segment_ID
+  formal-segment-id        ; 对应你的 Road_ID (原始SHP的FID)
+  link-in-outdoor     ; 对应你的 In_outdoor (室内外黄金开关)
+  
+  ; --- sDNA 空间句法核心指标 (用于后续停止条件计算) ---
+  link-mcdn  link-nqpdcn  link-btcn  link-tpbtcn  link-tpdn
+  link-lnkn  link-lenn    link-angdn  link-wtn    link-mglcn
+  link-mcfn  link-divcn   link-pr
+  link-wpr link-nqpdc500 link-btc500
+  
+  ; --- 基础属性 ---
+  link-fid      
+  edge-length
+  area-name
+  area-type
+
+  ; --- Index 11+ (New metrics from CSV) ---
+  weighted-page-rank
+  vec-x
+  vec-y
+  vec-z
+  azimuth
+
+  ; --- Traffic counters ---
+  flow-purposive-i
+  flow-purposive-ii
+  flow-simulated
+  flow-random
+  flow-random-od 
+  flow-purposive-od ; [新增] Purposive OD 模式的专属流量计数器
+
+  ; --- Footprint counters ---
+  footprint-flow-purposive-i
+  footprint-flow-purposive-ii
+  footprint-flow-simulated
+  footprint-flow-random
+  footprint-flow-random-od
+  footprint-flow-purposive-od
+]
+
+turtles-own [
+  numeric-id
+  node-degree
+  
+  ; 节点统计与导出属性
+  visit-count   ; 累计经过该节点的人次
+  true-x        ; 保存读取进来的真实三维坐标
+  true-y
+  true-z
+]
+
+breed [ persons person ]
+
+persons-own [
+  ; Stable person identifier and cumulative footprint ticks.
+  agent-id
+  agent-global-footprint
+  agent-indoor-footprint
+  agent-outdoor-footprint
+  ; Passage-flow counters are incremented once for each formal-segment change.
+  agent-global-passage-flow
+  agent-indoor-passage-flow
+  agent-outdoor-passage-flow
+  last-passage-formal-segment-id
+  speed
+  destination-node
+  target-node
+  current-path-nodes
+  node-at-start-of-leg
+  my-trajectory-types
+  traj-index
+  
+  ; [新增] 记录智能体当前的宏观区域性质，方便后续计算
+  my-current-area-type
+]
+
+; ----------------------------------------------------------------------
+; ;; --- B. Main Procedures (Setup and Go) --- ;;
+; ----------------------------------------------------------------------
+
+to setup
+  clear-all
+  
+  ; 初始化稳态判定变量
+  set previous-flow-proportions []
+  set previous-entropy -1
+  set stable-counter 0
+  set current-metric-value -1
+  set correlation-footprint-pearson-rows (list (fput "tick" correlation-metric-names))
+  set correlation-passage-pearson-rows (list (fput "tick" correlation-metric-names))
+  
+  output-print ">>> System initializing. Please click 'Go' to start."
+  setup-network
+  initialize-formal-segment-tables
+  read-trajectory-data
+  
+  ; [新增] 在网络建立完成后，立即计算区域中心与远近邻关系矩阵
+  calculate-macro-areas
+  
+  reset-ticks
+end
+
+to go
+  ; [修改] 将所有需要路径规划的模式纳入列表，增加了新模式 Purposive OD
+  let modes-needing-path ["Simulated" "Purposive I" "Purposive II" "Random OD" "Purposive OD"]
+
+  if member? movement-mode modes-needing-path [
+    let valid-paths ["Distance" "Angular" "Topological" "Hybrid"]
+    if not member? path-calculation-mode valid-paths [
+      print (word "Error: Invalid Path Algorithm for mode " movement-mode)
+      stop
+    ]
+  ]
+
+  if not any? persons [
+    setup-agents
+    output-print "--------------------------------------------------"
+    output-print (word ">>> Mode: " movement-mode)
+    if member? movement-mode modes-needing-path [
+      output-print (word ">>> Algo: " path-calculation-mode)
+    ]
+    output-print ">>> Simulation running..."
+    output-print "--------------------------------------------------"
+  ]
+
+  no-display
+  ask persons [ move ]
+  display
+
+  ; 调用画图函数
+  draw-power-law-plot "Power law distribution of Traffic flow" links
+  draw-power-law-plot "Traffic flow (Area 0)" (links with [area-type = 0])
+  
+  if (is-string? selected-area-name and selected-area-name != "") [
+    let mapping-link one-of links with [area-name = selected-area-name]
+    if mapping-link != nobody [
+      draw-power-law-plot "Traffic flow (Selected Area)" (links with [area-type = [area-type] of mapping-link])
+    ]
+  ]
+
+  set R-Square-String (calc-and-draw-correlation "Correlation between Traffic flow and Metric" links)
+  set R-Square-String-Area0 (calc-and-draw-correlation "Correlation (Area 0)" (links with [area-type = 0]))
+  
+  ifelse (is-string? selected-area-name and selected-area-name != "") [
+    let mapping-link one-of links with [area-name = selected-area-name]
+    ifelse mapping-link != nobody [
+      set R-Square-String-Selected (calc-and-draw-correlation "Correlation (Selected Area)" (links with [area-type = [area-type] of mapping-link]))
+    ] [ set R-Square-String-Selected "Area Not Found" ]
+  ] [ set R-Square-String-Selected "Select Area" ]
+
+  tick
+  
+  ; 每 50 步进行一次稳态判定检查
+  if ticks > 0 and ticks mod 50 = 0 [
+    if check-is-stable? [
+      export-all-data-auto  ; 触发自动导出并提醒
+      stop                  ; 停止 go 循环
+    ]
+  ]
+end
+
+; ----------------------------------------------------------------------
+; ;; --- C. Agent Setup & Initialization --- ;;
+; ----------------------------------------------------------------------
+
+to setup-agents
+  if movement-mode = "Simulated" and empty? all-trajectory-data [
+    print "Error: Trajectory data empty or missing."
+    stop
+  ]
+
+  let num-agents 1000
+
+  create-persons num-agents [
+    set agent-id who
+    set agent-global-footprint 0
+    set agent-indoor-footprint 0
+    set agent-outdoor-footprint 0
+    set agent-global-passage-flow 0
+    set agent-indoor-passage-flow 0
+    set agent-outdoor-passage-flow 0
+    set last-passage-formal-segment-id -1
+    set shape "person"
+    set size 0.5
+    set speed agent-speed
+    set current-path-nodes []
+    set target-node nobody
+
+    if movement-mode = "Simulated" [
+      set color red
+      set my-trajectory-types one-of all-trajectory-data
+      set traj-index 0
+      let start-type item 0 my-trajectory-types
+      let candidate-starts find-nodes-by-area-type start-type
+      ifelse (any? candidate-starts) [
+        let start-node one-of candidate-starts
+        move-to start-node
+        set node-at-start-of-leg start-node
+        ask start-node [ set visit-count visit-count + 1 ] 
+        assign-next-simulated-leg
+      ] [ die ]
+    ]
+
+    if movement-mode = "Purposive I" [
+      let start-node one-of turtles
+      move-to start-node
+      set node-at-start-of-leg start-node
+      ask start-node [ set visit-count visit-count + 1 ]
+      set color blue
+      assign-new-path start-node
+    ]
+
+    if movement-mode = "Purposive II" [
+      let start-node one-of turtles
+      move-to start-node
+      set node-at-start-of-leg start-node
+      ask start-node [ set visit-count visit-count + 1 ]
+      set color cyan
+      assign-new-path-II start-node
+    ]
+    
+    if movement-mode = "Random OD" [
+      set color magenta
+      ; area_type = 0 denotes roads; only positive area types are POI categories.
+      let valid-types filter [ t -> t > 0 ] (remove-duplicates [area-type] of links)
+      ifelse empty? valid-types [
+        die 
+      ] [
+        let start-type one-of valid-types
+        let start-candidates find-nodes-by-area-type start-type
+        ifelse any? start-candidates [
+          let start-node one-of start-candidates
+          move-to start-node
+          set node-at-start-of-leg start-node
+          ask start-node [ set visit-count visit-count + 1 ]
+          assign-new-path-random-od start-node
+        ] [ die ]
+      ]
+    ]
+
+    ; [新增] Purposive OD 模式的初始化出生与决策逻辑
+    if movement-mode = "Purposive OD" [
+      set color orange
+      ifelse empty? area-types-list [
+        die 
+      ] [
+        let start-type one-of area-types-list
+        set my-current-area-type start-type
+        let start-candidates find-nodes-by-area-type start-type
+        ifelse any? start-candidates [
+          let start-node one-of start-candidates
+          move-to start-node
+          set node-at-start-of-leg start-node
+          ask start-node [ set visit-count visit-count + 1 ]
+          assign-new-path-purposive-od start-node
+        ] [ die ]
+      ]
+    ]
+
+    if movement-mode = "Random" [
+      let start-node one-of turtles
+      move-to start-node
+      set node-at-start-of-leg start-node
+      ask start-node [ set visit-count visit-count + 1 ]
+      set color green
+      assign-random-next-step
+    ]
+  ]
+end
+
+; ----------------------------------------------------------------------
+; ;; --- D. Path Assignment & Movement Logic --- ;;
+; ----------------------------------------------------------------------
+
+to assign-random-next-step
+  let current-node one-of turtles-here
+  if current-node = nobody [ stop ]
+  let neighbors-nodes [link-neighbors] of current-node
+  ifelse any? neighbors-nodes [
+    set target-node one-of neighbors-nodes
+    set destination-node target-node
+    set current-path-nodes []
+  ] [ set target-node nobody ]
+end
+
+to assign-next-simulated-leg
+  set traj-index (traj-index + 1)
+  if (traj-index >= length my-trajectory-types) [
+    set my-trajectory-types one-of all-trajectory-data
+    set traj-index 0
+    let start-type item 0 my-trajectory-types
+    let candidate-starts find-nodes-by-area-type start-type
+    ifelse (any? candidate-starts) [
+      let new-start-node one-of candidate-starts
+      move-to new-start-node
+      set node-at-start-of-leg new-start-node
+      assign-next-simulated-leg
+      stop
+    ] [ die ]
+  ]
+
+  let next-type item traj-index my-trajectory-types
+  let candidate-destinations find-nodes-by-area-type next-type
+  set candidate-destinations (candidate-destinations with [self != myself])
+
+  ifelse (any? candidate-destinations) [
+    let end-node one-of candidate-destinations
+    set destination-node end-node
+    let start-id [numeric-id] of node-at-start-of-leg
+    let end-id [numeric-id] of end-node
+    
+    let final-path-nodes item 0 (get-conditional-shortest-path start-id end-id next-type)
+
+    ifelse (is-list? final-path-nodes and not empty? final-path-nodes)
+    [
+      let remaining-path (but-first final-path-nodes)
+      ifelse (empty? remaining-path)
+      [ set current-path-nodes [] set target-node nobody assign-next-simulated-leg ]
+      [ set current-path-nodes remaining-path set target-node (first remaining-path) ]
+    ]
+    [ assign-next-simulated-leg ]
+  ] [ assign-next-simulated-leg ]
+end
+
+to assign-new-path [ start-node ]
+  let start-id [numeric-id] of start-node
+  let end-node one-of (turtles with [self != start-node])
+  let end-id [numeric-id] of end-node
+  set destination-node end-node
+  let path-nodes-list item 0 (get-shortest-path start-id end-id)
+  ifelse (is-list? path-nodes-list and not empty? path-nodes-list) [
+    let remaining-path (but-first path-nodes-list)
+    ifelse (empty? remaining-path)
+    [ set current-path-nodes [] set target-node nobody ]
+    [ set current-path-nodes remaining-path set target-node (first remaining-path) ]
+  ] [ set current-path-nodes [] set target-node nobody ]
+end
+
+to assign-new-path-II [ start-node ]
+  let end-node find-purposive-II-destination start-node
+  let start-id [numeric-id] of start-node
+  if (end-node = nobody) [ set target-node nobody set current-path-nodes [] stop ]
+  let end-id [numeric-id] of end-node
+  set destination-node end-node
+  let path-nodes-list item 0 (get-shortest-path start-id end-id)
+  ifelse (is-list? path-nodes-list and not empty? path-nodes-list) [
+    let remaining-path (but-first path-nodes-list)
+    ifelse (empty? remaining-path)
+    [ set current-path-nodes [] set target-node nobody ]
+    [ set current-path-nodes remaining-path set target-node (first remaining-path) ]
+  ] [ set current-path-nodes [] set target-node nobody ]
+end
+
+to assign-new-path-random-od [ start-node ]
+  let valid-types filter [ t -> t > 0 ] (remove-duplicates [area-type] of links)
+  ifelse empty? valid-types [
+    set target-node nobody
+    set current-path-nodes []
+  ] [
+    let target-type one-of valid-types
+    let candidate-nodes (find-nodes-by-area-type target-type) with [self != start-node]
+    ifelse any? candidate-nodes [
+      let end-node one-of candidate-nodes
+      set destination-node end-node
+      let start-id [numeric-id] of start-node
+      let end-id [numeric-id] of end-node
+      
+      let path-nodes-list item 0 (get-shortest-path start-id end-id)
+      ifelse (is-list? path-nodes-list and not empty? path-nodes-list) [
+        let remaining-path (but-first path-nodes-list)
+        ifelse (empty? remaining-path)
+        [ set current-path-nodes [] set target-node nobody ]
+        [ set current-path-nodes remaining-path set target-node (first remaining-path) ]
+      ] [ set current-path-nodes [] set target-node nobody ]
+    ] [
+      set current-path-nodes [] set target-node nobody
+    ]
+  ]
+end
+
+; [新增] Purposive OD 模式的专属寻路分配器 (80%近邻区域概率, 20%远邻区域概率)
+to assign-new-path-purposive-od [ start-node ]
+  let current-type my-current-area-type
+  let target-type 0
+  
+  let near-list table:get area-nearpoi-table current-type
+  let far-list table:get area-farpoi-table current-type
+  
+  ifelse (random-float 1.0 < 0.80) [
+    ifelse not empty? near-list [ set target-type one-of near-list ] [ set target-type one-of area-types-list ]
+  ] [
+    ifelse not empty? far-list [ set target-type one-of far-list ] [ set target-type one-of area-types-list ]
+  ]
+  
+  let destination-candidates find-nodes-by-area-type target-type
+  set destination-candidates (destination-candidates with [self != start-node])
+  
+  ifelse any? destination-candidates [
+    let end-node one-of destination-candidates
+    set destination-node end-node
+    let start-id [numeric-id] of start-node
+    let end-id [numeric-id] of end-node
+    
+    set my-current-area-type target-type ; 更新宏观区域状态特征
+    
+    let path-nodes-list item 0 (get-shortest-path start-id end-id)
+    ifelse (is-list? path-nodes-list and not empty? path-nodes-list) [
+      let remaining-path (but-first path-nodes-list)
+      ifelse (empty? remaining-path)
+      [ set current-path-nodes [] set target-node nobody ]
+      [ set current-path-nodes remaining-path set target-node (first remaining-path) ]
+    ] [ set current-path-nodes [] set target-node nobody ]
+  ] [
+    set current-path-nodes [] set target-node nobody
+  ]
+end
+
+to-report find-purposive-II-destination [ start-node ]
+  let end-node nobody
+  ifelse (random-float 1.0 < 0.20)
+  [ set end-node one-of (turtles with [self != start-node]) ]
+  [
+    let n1 [link-neighbors] of start-node
+    let n2 (turtle-set [link-neighbors] of n1)
+    let candidates (turtle-set n1 n2)
+    let final-candidates (candidates with [self != start-node])
+    ifelse (any? final-candidates)
+    [ set end-node one-of final-candidates ]
+    [ set end-node one-of (turtles with [self != start-node]) ]
+  ]
+  report end-node
+end
+
+to move
+  if movement-mode = "Purposive I" [ if color != blue [ set color blue ] ]
+  if movement-mode = "Purposive II" [ if color != cyan [ set color cyan ] ]
+  if movement-mode = "Simulated" [ if color != red [ set color red ] ]
+  if movement-mode = "Random" [ if color != green [ set color green ] ]
+  if movement-mode = "Random OD" [ if color != magenta [ set color magenta ] ] 
+  if movement-mode = "Purposive OD" [ if color != orange [ set color orange ] ] ; [新增]
+
+  if not is-turtle? target-node [
+    if movement-mode != "Simulated" [
+      let current-location (one-of turtles-here)
+      if (current-location = nobody) [ set current-location min-one-of turtles [distance myself] move-to current-location]
+      set node-at-start-of-leg current-location
+      if movement-mode = "Purposive I" [ assign-new-path current-location ]
+      if movement-mode = "Purposive II" [ assign-new-path-II current-location ]
+      if movement-mode = "Random OD" [ assign-new-path-random-od current-location ] 
+      if movement-mode = "Purposive OD" [ assign-new-path-purposive-od current-location ] ; [新增]
+      if movement-mode = "Random" [ assign-random-next-step ]
+    ]
+    stop
+  ]
+
+  face target-node
+  let dist distance target-node
+
+  ; Passage flow counts one passage when the next traversed lower link
+  ; belongs to a different formal segment than the previous one.
+  if is-turtle? node-at-start-of-leg [
+    let passage-from-node node-at-start-of-leg
+    let passage-link [link-with passage-from-node] of target-node
+    if passage-link != nobody [
+      let next-formal-segment-id [formal-segment-id] of passage-link
+      if next-formal-segment-id != last-passage-formal-segment-id [
+        set agent-global-passage-flow (agent-global-passage-flow + 1)
+        if [link-in-outdoor] of passage-link = 0 [
+          set agent-indoor-passage-flow (agent-indoor-passage-flow + 1)
+        ]
+        if [link-in-outdoor] of passage-link = 1 [
+          set agent-outdoor-passage-flow (agent-outdoor-passage-flow + 1)
+        ]
+        ask passage-link [ increment-formal-segment-passage-flow 1 ]
+        set last-passage-formal-segment-id next-formal-segment-id
+      ]
+    ]
+  ]
+
+  ; Footprints measure integer simulation ticks spent on the current link.
+  ; Legacy lower-link flow is counted once at link completion; footprint flow is counted
+  ; once per tick while an agent occupies/traverses the link.
+  let footprint-tick-share 1
+  if is-turtle? node-at-start-of-leg [
+    let footprint-from-node node-at-start-of-leg
+    let footprint-link [link-with footprint-from-node] of target-node
+    if (footprint-link != nobody and footprint-tick-share > 0) [
+      ; The current person accumulates ticks across the full simulation,
+      ; including after a Simulated POI-sequence reset.
+      set agent-global-footprint (agent-global-footprint + footprint-tick-share)
+      if [link-in-outdoor] of footprint-link = 0 [
+        set agent-indoor-footprint (agent-indoor-footprint + footprint-tick-share)
+      ]
+      if [link-in-outdoor] of footprint-link = 1 [
+        set agent-outdoor-footprint (agent-outdoor-footprint + footprint-tick-share)
+      ]
+      ask footprint-link [ increment-current-footprint-flow footprint-tick-share ]
+    ]
+  ]
+
+  ifelse (speed >= dist) [
+    move-to target-node
+    let current-node target-node
+    
+    ask current-node [ set visit-count visit-count + 1 ]
+
+    let from-node node-at-start-of-leg
+    let traversed-link [link-with from-node] of current-node
+
+    if (traversed-link != nobody) [
+      ask traversed-link [
+        if movement-mode = "Purposive I" [ set flow-purposive-i (flow-purposive-i + 1) ]
+        if movement-mode = "Purposive II" [ set flow-purposive-ii (flow-purposive-ii + 1) ]
+        if movement-mode = "Simulated" [ set flow-simulated (flow-simulated + 1) ]
+        if movement-mode = "Random" [ set flow-random (flow-random + 1) ]
+        if movement-mode = "Random OD" [ set flow-random-od (flow-random-od + 1) ] 
+        if movement-mode = "Purposive OD" [ set flow-purposive-od (flow-purposive-od + 1) ] ; [新增]
+      ]
+    ]
+
+    ifelse not is-list? current-path-nodes [ set current-path-nodes [] ] [ ]
+
+    ifelse (not empty? current-path-nodes) [
+      set current-path-nodes (but-first current-path-nodes)
+      ifelse (empty? current-path-nodes) [
+        ifelse movement-mode = "Simulated"
+        [ set node-at-start-of-leg current-node assign-next-simulated-leg ]
+        [
+          if movement-mode = "Purposive I" [ assign-new-path destination-node ]
+          if movement-mode = "Purposive II" [ assign-new-path-II destination-node ]
+          if movement-mode = "Random OD" [ assign-new-path-random-od destination-node ] 
+          if movement-mode = "Purposive OD" [ assign-new-path-purposive-od destination-node ] ; [新增]
+          if movement-mode = "Random" [ assign-random-next-step ]
+        ]
+      ]
+      [ set target-node (first current-path-nodes) ]
+    ]
+    [
+      if movement-mode = "Simulated" [ set node-at-start-of-leg current-node assign-next-simulated-leg ]
+      if movement-mode = "Purposive I" [ assign-new-path current-node ]
+      if movement-mode = "Purposive II" [ assign-new-path-II current-node ]
+      if movement-mode = "Random OD" [ assign-new-path-random-od current-node ] 
+      if movement-mode = "Purposive OD" [ assign-new-path-purposive-od current-node ] ; [新增]
+      if movement-mode = "Random" [ assign-random-next-step ]
+    ]
+    set node-at-start-of-leg current-node
+  ]
+  [ 
+    fd speed 
+  ]
+  set speed agent-speed
+end
+
+; ----------------------------------------------------------------------
+; ;; --- E. Network & Data Reading --- ;;
+; ----------------------------------------------------------------------
+
+to setup-network
+  set property-names [ "edge-length" ]
+  read-data
+  adjust-world-boundaries
+  create-graph-from-data
+  set-patch-size 10
+  display
+end
+
+to adjust-world-boundaries
+  if empty? raw-edge-data [ stop ]
+  let min-x 999999 let max-x -999999
+  let min-y 999999 let max-y -999999
+  let min-z 999999 let max-z -999999
+  
+  foreach raw-edge-data [ line ->
+    let x1 item 4 line   let y1 item 5 line   let z1 item 6 line
+    let x2 item 7 line   let y2 item 8 line   let z2 item 9 line
+    
+    if x1 < min-x [ set min-x x1 ] if x1 > max-x [ set max-x x1 ]
+    if y1 < min-y [ set min-y y1 ] if y1 > max-y [ set max-y y1 ]
+    if z1 < min-z [ set min-z z1 ] if z1 > max-z [ set max-z z1 ]
+    if x2 < min-x [ set min-x x2 ] if x2 > max-x [ set max-x x2 ]
+    if y2 < min-y [ set min-y y2 ] if y2 > max-y [ set max-y y2 ]
+    if z2 < min-z [ set min-z z2 ] if z2 > max-z [ set max-z z2 ]
+  ]
+  
+  let bound-min-x (floor min-x) - 5 let bound-max-x (ceiling max-x) + 5
+  let bound-min-y (floor min-y) - 5 let bound-max-y (ceiling max-y) + 5
+  let bound-min-z (floor min-z) - 5 let bound-max-z (ceiling max-z) + 5
+  if bound-min-z >= bound-max-z [ set bound-min-z bound-min-z - 2 set bound-max-z bound-max-z + 2 ]
+  resize-world bound-min-x bound-max-x bound-min-y bound-max-y bound-min-z bound-max-z
+end
+
+to read-data
+  set raw-edge-data []
+  ; 【核心修改】更换为你最新的微观精简版拓扑数据源文件
+  let file-name "SZU_network_0728_T_E_link_slim.csv"
+  carefully [ 
+    file-open file-name 
+    let header file-read-line 
+    while [not file-at-end?] [
+      let row-str file-read-line
+      if row-str != "" [
+        let edge-info csv:from-row row-str
+        if (is-list? edge-info and length edge-info >= 34) [ set raw-edge-data lput edge-info raw-edge-data ]
+      ]
+    ]
+    file-close
+  ] [ error (word "Cannot read " file-name ": " error-message) ]
+end
+
+to read-trajectory-data
+  set all-trajectory-data []
+  let file-name "master_trajectory_summaries.csv"
+  ifelse file-exists? file-name [
+    carefully [
+      file-open file-name let header file-read-line
+      while [not file-at-end?] [
+        let row-str file-read-line
+        if row-str != "" [
+          let row-data csv:from-row row-str
+          if (is-list? row-data and length row-data >= 6) [
+            let poi-str item 5 row-data
+            let poi-list csv:from-row poi-str
+            if not empty? poi-list [ set all-trajectory-data lput poi-list all-trajectory-data ]
+          ]
+        ]
+      ]
+      file-close
+    ] [ print (word "Error reading " file-name ": " error-message) ]
+  ] [ print (word "Warning: Cannot find '" file-name "' in the directory.") ]
+end
+
+to create-graph-from-data
+  let node-coords-table table:make
+  set node-id-to-turtle-table table:make
+
+  foreach raw-edge-data [ line ->
+    let n1 item 2 line let coords1 (list (item 4 line) (item 5 line) (item 6 line))
+    let n2 item 3 line let coords2 (list (item 7 line) (item 8 line) (item 9 line))
+    table:put node-coords-table n1 coords1
+    table:put node-coords-table n2 coords2
+  ]
+
+  foreach table:keys node-coords-table [ node-id ->
+    let coords table:get node-coords-table node-id
+    create-turtles 1 [
+      set true-x (item 0 coords)
+      set true-y (item 1 coords)
+      set true-z (item 2 coords)
+      setxyz true-x true-y true-z
+      
+      set hidden? false set color blue set shape "circle" set size 0.2
+      set numeric-id node-id
+      set node-degree 0
+      set visit-count 0 
+      table:put node-id-to-turtle-table node-id self
+    ]
+  ]
+
+  foreach raw-edge-data [ line ->
+    let n1 item 2 line let n2 item 3 line
+    let turtle1 table:get node-id-to-turtle-table n1
+    let turtle2 table:get node-id-to-turtle-table n2
+
+    if (turtle1 != turtle2) [
+      ask turtle1 [
+        create-link-with turtle2 [
+          set hidden? false set color white set thickness 0.05
+          
+          ; === 严格对齐新CSV表头的空间句法参数属性映射 ===
+          set lower-link-id (item 0 line)      ; segment_ID
+          set formal-segment-id (item 1 line)         ; Road_ID (原始SHP的FID)
+          set edge-length (item 10 line)         ; Length (路段物理长度)
+          set area-name (item 11 line)           ; area_name
+          set area-type (item 12 line)           ; area_type
+          set link-in-outdoor (item 13 line)     ; In_outdoor (室内外黄金分类标签)
+          
+          ; 装载全部 sDNA 核心全局网络形态指标
+          set link-mcdn (item 16 line)   set link-nqpdcn (item 17 line)
+          set link-btcn (item 18 line)   set link-tpbtcn (item 19 line)
+          set link-tpdn (item 20 line)   set link-lnkn 0
+          set link-lenn 0               set link-angdn 0
+          set link-wtn 0                set link-mglcn (item 21 line)
+          set link-mcfn (item 22 line)  set link-divcn (item 23 line)
+          set link-pr (item 24 line)     ; PR (纯拓扑PageRank评分)
+          set weighted-page-rank (item 25 line)
+          set link-wpr weighted-page-rank
+          set link-nqpdc500 (item 26 line)
+          set link-btc500 (item 27 line)  ; WPR (度加权PageRank评分)
+          
+          set vec-x (item 28 line) set vec-y (item 29 line) set vec-z (item 30 line)
+          set azimuth (item 31 line)
+          set link-fid formal-segment-id
+          
+          set flow-purposive-i 0 set flow-purposive-ii 0 set flow-simulated 0 set flow-random 0
+          set flow-random-od 0 set flow-purposive-od 0
+          set footprint-flow-purposive-i 0 set footprint-flow-purposive-ii 0
+          set footprint-flow-simulated 0 set footprint-flow-random 0
+          set footprint-flow-random-od 0 set footprint-flow-purposive-od 0
+        ]
+      ]
+      let deg1 item 32 line let deg2 item 33 line
+      ask turtle1 [ set node-degree deg1 ] ask turtle2 [ set node-degree deg2 ]
+    ]
+  ]
+  nw:set-context turtles links 
+end
+
+; [新增] 预先计算宏观认知面积的函数机制 (Purposive OD 核心底座)
+to calculate-macro-areas
+  set area-types-list filter [ t -> t > 0 ] (remove-duplicates [area-type] of links)
+  set area-centers-table table:make
+  set area-nearpoi-table table:make
+  set area-farpoi-table table:make
+  
+  foreach area-types-list [ t ->
+    let member-nodes find-nodes-by-area-type t
+    ifelse any? member-nodes [
+      let avg-x mean [true-x] of member-nodes
+      let avg-y mean [true-y] of member-nodes
+      table:put area-centers-table t (list avg-x avg-y)
+    ] [ table:put area-centers-table t (list 0 0) ]
+  ]
+  
+  foreach area-types-list [ t1 ->
+    let c1 table:get area-centers-table t1
+    let x1 item 0 c1 let y1 item 1 c1
+    let dist-list []
+    foreach area-types-list [ t2 ->
+      if t1 != t2 [
+        let c2 table:get area-centers-table t2
+        let x2 item 0 c2 let y2 item 1 c2
+        let d sqrt ((x1 - x2) ^ 2 + (y1 - y2) ^ 2)
+        set dist-list lput (list d t2) dist-list
+      ]
+    ]
+    let sorted-dist-list sort-by [ [a b] -> item 0 a < item 0 b ] dist-list
+    let total-count length sorted-dist-list
+    let near-list [] let far-list []
+    
+    ifelse total-count < 2 [
+      set near-list area-types-list set far-list area-types-list
+    ] [
+      let cutoff-index max (list 1 (floor (total-count * 0.2)))
+      let i 0
+      while [i < cutoff-index] [ set near-list lput item 1 (item i sorted-dist-list) near-list set i i + 1 ]
+      while [i < total-count] [ set far-list lput item 1 (item i sorted-dist-list) far-list set i i + 1 ]
+    ]
+    table:put area-nearpoi-table t1 near-list
+    table:put area-farpoi-table t1 far-list
+  ]
+  output-print ">>> Macro area centers and proximity attenuation matrix calculated."
+end
+
+; ----------------------------------------------------------------------
+; ;; --- F. Helper Functions (Path & Nodes) --- ;;
+; ----------------------------------------------------------------------
+
+to-report get-shortest-path [ start-node-id end-node-id ]
+  let start-turtle (table:get node-id-to-turtle-table start-node-id)
+  let end-turtle (table:get node-id-to-turtle-table end-node-id)
+  if (start-turtle = nobody or end-turtle = nobody) [ report [[][]] ]
+
+  ifelse path-calculation-mode = "Angular" [
+    report find-path-by-angular-change start-turtle end-turtle
+  ]
+  [
+    ifelse path-calculation-mode = "Hybrid" [
+      report find-path-by-hybrid start-turtle end-turtle
+    ]
+    [
+      let path-links [] let path-nodes []
+      ask start-turtle [
+        ifelse path-calculation-mode = "Topological"
+        [ set path-links ( nw:path-to end-turtle ) set path-nodes ( nw:turtles-on-path-to end-turtle ) ]
+        [ set path-links ( nw:weighted-path-to end-turtle "edge-length" ) set path-nodes ( nw:turtles-on-weighted-path-to end-turtle "edge-length" ) ]
+      ]
+      report (list path-nodes path-links)
+    ]
+  ]
+end
+
+to-report get-conditional-shortest-path [ start-node-id end-node-id target-type ]
+  report get-shortest-path start-node-id end-node-id
+end
+
+to-report find-nodes-by-area-type [ type-val ]
+  report turtle-set [both-ends] of links with [area-type = type-val]
+end
+
+; ----------------------------------------------------------------------
+; ;; --- G. Plotting, Analysis & Stopping Condition --- ;;
+; ----------------------------------------------------------------------
+
+to-report get-current-flow
+  if movement-mode = "Purposive I" [ report flow-purposive-i ]
+  if movement-mode = "Purposive II" [ report flow-purposive-ii ]
+  if movement-mode = "Simulated" [ report flow-simulated ]
+  if movement-mode = "Random" [ report flow-random ]
+  if movement-mode = "Random OD" [ report flow-random-od ]
+  if movement-mode = "Purposive OD" [ report flow-purposive-od ] ; [新增]
+  report 0
+end
+
+to increment-current-footprint-flow [ amount ]
+  if movement-mode = "Purposive I" [ set footprint-flow-purposive-i (footprint-flow-purposive-i + amount) ]
+  if movement-mode = "Purposive II" [ set footprint-flow-purposive-ii (footprint-flow-purposive-ii + amount) ]
+  if movement-mode = "Simulated" [ set footprint-flow-simulated (footprint-flow-simulated + amount) ]
+  if movement-mode = "Random" [ set footprint-flow-random (footprint-flow-random + amount) ]
+  if movement-mode = "Random OD" [ set footprint-flow-random-od (footprint-flow-random-od + amount) ]
+  if movement-mode = "Purposive OD" [ set footprint-flow-purposive-od (footprint-flow-purposive-od + amount) ]
+  increment-formal-segment-footprint-flow amount
+end
+
+to-report get-current-footprint-flow
+  if movement-mode = "Purposive I" [ report footprint-flow-purposive-i ]
+  if movement-mode = "Purposive II" [ report footprint-flow-purposive-ii ]
+  if movement-mode = "Simulated" [ report footprint-flow-simulated ]
+  if movement-mode = "Random" [ report footprint-flow-random ]
+  if movement-mode = "Random OD" [ report footprint-flow-random-od ]
+  if movement-mode = "Purposive OD" [ report footprint-flow-purposive-od ]
+  report 0
+end
+
+to draw-power-law-plot [ plot-title target-links ]
+  set-current-plot plot-title
+  auto-plot-on
+  clear-plot
+  set-plot-pen-mode 0
+
+  let trafficFlow-list []
+  ask target-links [
+    let current-flow get-current-flow
+    if current-flow > 0 [ set trafficFlow-list lput current-flow trafficFlow-list ]
+  ]
+
+  if (empty? trafficFlow-list) or (length (remove-duplicates trafficFlow-list) < 2) [ stop ]
+  let max-flow max trafficFlow-list
+  if (max-flow < 0) [ set max-flow 0 ]
+  let log-histogram n-values (floor max-flow + 1) [0]
+
+  let i_hist 0
+  while [i_hist < (length trafficFlow-list)] [
+    let flow (item i_hist trafficFlow-list)
+    let int-flow floor flow
+    let old-value item int-flow log-histogram
+    set log-histogram replace-item int-flow log-histogram (old-value + 1)
+    set i_hist (i_hist + 1)
+  ]
+
+  let tracked-list-new (sort remove-duplicates trafficFlow-list)
+  let min-unique-flow min tracked-list-new
+  let max-unique-flow max tracked-list-new
+  if (min-unique-flow = max-unique-flow) [ stop ]
+
+  let tracked-list-new-rectify []
+  let i_norm 0
+  while [i_norm < (length tracked-list-new)] [
+    let a-value (item i_norm tracked-list-new)
+    let norm-value (99 * (a-value - min-unique-flow) / (max-unique-flow - min-unique-flow)) + 1
+    set tracked-list-new-rectify (lput norm-value tracked-list-new-rectify)
+    set i_norm (i_norm + 1)
+  ]
+
+  let log-histogram-1 (filter [c -> c > 0] log-histogram)
+  if (length log-histogram-1 != length tracked-list-new-rectify) [ stop ]
+  let totalNum sum log-histogram-1
+  if (totalNum = 0) [ stop ]
+  let log-histogram-2 (map [c -> c / totalNum] log-histogram-1)
+
+  let log-histogram-rectify []
+  let index 0
+  while [index < (length log-histogram-2)] [
+    let index1 index let eleSum 0
+    while [index1 < (length log-histogram-2)] [
+      let ele item index1 log-histogram-2
+      set eleSum eleSum + ele
+      set index1 index1 + 1
+    ]
+    set log-histogram-rectify (lput eleSum log-histogram-rectify)
+    set index index + 1
+  ]
+
+  let plot-pairs (map list tracked-list-new-rectify log-histogram-rectify)
+  foreach plot-pairs [ pair ->
+    let x item 0 pair let y item 1 pair
+    if (x > 0 and y > 0) [ plotxy (log x 10) (log y 10) ]
+  ]
+end
+
+to-report calc-and-draw-correlation [ plot-title target-links ]
+  set-current-plot plot-title
+  auto-plot-on
+  plot-pen-up
+
+  if analysis-metric = 0 or analysis-metric = "" [ report "Select Metric" ]
+
+  let raw-data-pairs []
+  ask target-links [
+    let flow-val get-current-flow
+    let metric-val 0
+    if analysis-metric = "weighted-page-rank" [ set metric-val weighted-page-rank ]
+    if analysis-metric = "edge-length" [ set metric-val edge-length ]
+    if analysis-metric = "azimuth" [ set metric-val azimuth ]
+    if analysis-metric = "link-btcn" [ set metric-val link-btcn ]
+
+    if (flow-val > 0 and metric-val > 0) [ set raw-data-pairs lput (list flow-val metric-val) raw-data-pairs ]
+  ]
+
+  if length raw-data-pairs < 2 [ clear-plot report "N/A" ]
+
+  clear-plot
+  set-plot-pen-mode 2
+
+  let flow-list map [ p -> item 0 p ] raw-data-pairs
+  let metric-list map [ p -> item 1 p ] raw-data-pairs
+
+  let min-flow min flow-list
+  let max-flow max flow-list
+  let range-flow (max-flow - min-flow)
+  foreach raw-data-pairs [ pair ->
+    let raw-f item 0 pair let raw-m item 1 pair let plot-f 1
+    if range-flow > 0 [ set plot-f (1 + (99 * (raw-f - min-flow) / range-flow)) ]
+    plotxy (log plot-f 10) (log raw-m 10)
+  ]
+
+  if correlation-method = "Power 0.25" [
+    let flow-q map [ x -> x ^ 0.25 ] flow-list
+    let metric-q map [ x -> x ^ 0.25 ] metric-list
+    let r (calculate-pearson flow-q metric-q)
+    report (word "R2: " precision (r * r) 3)
+  ]
+  if correlation-method = "Log-Log" [
+    let flow-log map [ x -> log x 10 ] flow-list
+    let metric-log map [ x -> log x 10 ] metric-list
+    let r (calculate-pearson flow-log metric-log)
+    report (word "R2(log): " precision (r * r) 3)
+  ]
+  if correlation-method = "Spearman" [
+    let flow-ranks get-ranks flow-list
+    let metric-ranks get-ranks metric-list
+    let rho (calculate-pearson flow-ranks metric-ranks)
+    report (word "Rho: " precision rho 3)
+  ]
+  report "Method Error"
+end
+
+; ======================================================================
+; === 重构后的稳态判定核心算法（融入 Jiang Bin 论文相关性高位平盘收敛机制） ===
+; ======================================================================
+
+to-report calculate-flow-proportions
+  let total-flow 0
+  let flows []
+  ask links [
+    let f get-current-flow
+    set flows lput f flows
+    set total-flow total-flow + f
+  ]
+  if total-flow = 0 [ report n-values count links [0] ]
+  report map [ f -> f / total-flow ] flows
+end
+
+to-report calculate-rmse [ current-props prev-props ]
+  if empty? prev-props [ report 0 ] 
+  let sum-sq 0
+  let n length current-props
+  (foreach current-props prev-props [ [curr prev] ->
+    set sum-sq sum-sq + ((curr - prev) ^ 2)
+  ])
+  report sqrt (sum-sq / n)
+end
+
+to-report calculate-entropy [ props ]
+  let h 0
+  foreach props [ p -> if p > 0 [ set h h - (p * ln p) ] ]
+  report h
+end
+
+to-report check-is-stable?
+  if stopping-condition = "None" [ report false ]
+
+  let current-r 0
+  let diff 0
+  let threshold 0.0005  ; 设定极高变化率平盘阈值(50步内r波动低于0.0005说明进入Jiang Bin平盘期)
+  let is-first-check? false
+
+  ; 判定 1: 传统比例 RMSE 收敛
+  if stopping-condition = "RMSE" [
+    set threshold 0.0001
+    let current-props calculate-flow-proportions
+    ifelse empty? previous-flow-proportions [ set is-first-check? true ] 
+    [ set diff calculate-rmse current-props previous-flow-proportions ]
+    set previous-flow-proportions current-props
+  ]
+
+  ; 判定 2: 传统香农熵收敛
+  if stopping-condition = "Shannon Entropy" [
+    set threshold 0.001
+    let current-props calculate-flow-proportions
+    let current-ent calculate-entropy current-props
+    ifelse previous-entropy = -1 [ set is-first-check? true ] 
+    [ set diff abs (current-ent - previous-entropy) ]
+    set previous-entropy current-ent
+  ]
+
+  ; 判定 3: 【Jiang Bin 论文方法】基于全局中介中心性 (BtCn) 相关系数平盘判定
+  if stopping-condition = "Correlation_BtCn" [
+    let flows []
+    let metrics []
+    ask links [
+      let f get-current-flow
+      if f > 0 [
+        set flows lput f flows
+        set metrics lput link-btcn metrics
+      ]
+    ]
+    ifelse length flows < 5 [ set is-first-check? true ] [
+      set current-r calculate-pearson flows metrics
+      ifelse previous-entropy = -1 [ set is-first-check? true ] 
+      [ set diff abs (current-r - previous-entropy) ] ; 差值即平盘移动变化率
+      set previous-entropy current-r
+    ]
+  ]
+
+  ; 判定 4: 【Jiang Bin 论文方法】基于度加权 PageRank (WPR) 相关系数平盘判定
+  if stopping-condition = "Correlation_WPR" [
+    let flows []
+    let metrics []
+    ask links [
+      let f get-current-flow
+      if f > 0 [
+        set flows lput f flows
+        set metrics lput weighted-page-rank metrics
+      ]
+    ]
+    ifelse length flows < 5 [ set is-first-check? true ] [
+      set current-r calculate-pearson flows metrics
+      ifelse previous-entropy = -1 [ set is-first-check? true ] 
+      [ set diff abs (current-r - previous-entropy) ]
+      set previous-entropy current-r
+    ]
+  ]
+
+  if not is-first-check? [ set current-metric-value diff ]
+
+  ; 时间窗口连续性判定计数器
+  ifelse is-first-check? [
+    set stable-counter 0
+  ] [
+    ifelse diff < threshold [ set stable-counter stable-counter + 1 ] [ set stable-counter 0 ]
+  ]
+
+  ; 连续 3 次检查(150步内)斜率波动趋于饱和，宣告进入高位平盘
+  if stable-counter >= 3 [ report true ]
+  report false
+end
+
+
+; --- Stats Helper Functions ---
+to-report calculate-pearson [list1 list2]
+  let len1 length list1 if len1 < 2 [ report 0 ]
+  let mean1 mean list1 let mean2 mean list2
+  let std1 standard-deviation list1 let std2 standard-deviation list2
+  if (std1 = 0 or std2 = 0) [ report 0 ]
+  let cov 0
+  (foreach list1 list2 [ [x y] -> set cov cov + ((x - mean1) * (y - mean2)) ])
+  set cov (cov / (len1 - 1)) 
+  report (cov / (std1 * std2))
+end
+
+to-report get-ranks [ input-list ]
+  let len length input-list let indexed-list [] let i 0
+  foreach input-list [ val -> set indexed-list lput (list val i) indexed-list set i i + 1 ]
+  let sorted-list sort-by [ [a b] -> item 0 a < item 0 b ] indexed-list
+  let ranks-array n-values len [0] let current-idx 0
+  
+  while [current-idx < len] [
+    let start-idx current-idx let val item 0 (item start-idx sorted-list)
+    let end-idx start-idx + 1
+    while [end-idx < len and (item 0 (item end-idx sorted-list) = val)] [ set end-idx end-idx + 1 ]
+    let sum-ranks 0 let k start-idx
+    while [k < end-idx] [ set sum-ranks sum-ranks + (k + 1) set k k + 1 ]
+    let avg-rank sum-ranks / (end-idx - start-idx)
+    let m start-idx
+    while [m < end-idx] [
+      let original-idx item 1 (item m sorted-list)
+      set ranks-array replace-item original-idx ranks-array avg-rank
+      set m m + 1
+    ]
+    set current-idx end-idx
+  ]
+  report ranks-array
+end
+
+; ----------------------------------------------------------------------
+; ;; --- H. Export Functions --- ;;
+; ----------------------------------------------------------------------
+
+to export-all-data
+  let target-folder get-output-folder
+  export-flow-data target-folder
+  export-passage-flow-data target-folder
+  export-agent-footprint-data target-folder
+  export-agent-passage-flow-data target-folder
+  export-correlation-history target-folder
+  print (word "一键导出完成！\n所有 CSV 文件已成功保存至 '" target-folder "' 文件夹中。")
+end
+
+to export-all-data-auto
+  let target-folder get-output-folder
+  export-flow-data target-folder
+  export-passage-flow-data target-folder
+  export-agent-footprint-data target-folder
+  export-agent-passage-flow-data target-folder
+  export-correlation-history target-folder
+  print (word "【自动停止与数据导出成功】\n\n系统在 Tick " ticks " 达到 [" stopping-condition "] 稳态高位平盘。\n\n此时指标的变化率/波动值为: " precision current-metric-value 6 "\n仿真已自动停止，且数据已成功输出至 '" target-folder "' 文件夹！")
+end
+
+to export-flow-data [ folder-path ]
+  file-close-all
+  let mode-part movement-mode
+  if mode-part = "Random OD" [ set mode-part "Random_OD" ] 
+  if mode-part = "Purposive OD" [ set mode-part "Purposive_OD" ]
+  
+  let base-name (word "formal_segment_cumulative_footprint_flow_" mode-part "_" path-calculation-mode)
+  let file-name get-safe-output-file-name folder-path base-name
+  
+  let rows (list (list "formal_segment_id" "in_outdoor" "n_lower_links" "footprint_flow" "NQPD" "Bt" "PR"))
+
+  foreach sort formal-segment-ids-list [ segment-id ->
+    let metrics table:get formal-segment-metric-table segment-id
+    let row (list segment-id
+      (table:get formal-segment-space-table segment-id)
+      (table:get formal-segment-lower-link-count-table segment-id)
+      (table:get formal-segment-footprint-flow-table segment-id)
+      (item 0 metrics)
+      (item 1 metrics)
+      (item 2 metrics))
+    set rows lput row rows
+  ]
+  csv:to-file file-name rows
+  print (word ">>> Automatically exported: " file-name)
+end
+
+
+to export-passage-flow-data [ folder-path ]
+  let mode-part movement-mode
+  if mode-part = "Random OD" [ set mode-part "Random_OD" ]
+  if mode-part = "Purposive OD" [ set mode-part "Purposive_OD" ]
+  let base-name (word "formal_segment_cumulative_passage_flow_" mode-part "_" path-calculation-mode)
+  let rows (list (list "formal_segment_id" "in_outdoor" "n_lower_links" "passage_flow" "NQPD" "Bt" "PR"))
+  foreach sort formal-segment-ids-list [ segment-id ->
+    let metrics table:get formal-segment-metric-table segment-id
+    set rows lput (list segment-id
+      (table:get formal-segment-space-table segment-id)
+      (table:get formal-segment-lower-link-count-table segment-id)
+      (table:get formal-segment-passage-flow-table segment-id)
+      (item 0 metrics)
+      (item 1 metrics)
+      (item 2 metrics)) rows
+  ]
+  csv:to-file (get-safe-output-file-name folder-path base-name) rows
+end
+
+to export-agent-passage-flow-data [ folder-path ]
+  let mode-part movement-mode
+  if mode-part = "Random OD" [ set mode-part "Random_OD" ]
+  if mode-part = "Purposive OD" [ set mode-part "Purposive_OD" ]
+  let base-name (word "agent_cumulative_passage_flow_" mode-part "_" path-calculation-mode)
+  let rows (list (list "agent_id" "mechanism" "global_passage_flow" "indoor_passage_flow" "outdoor_passage_flow"))
+  foreach sort-on [agent-id] persons [ the-person ->
+    let global-flow [agent-global-passage-flow] of the-person
+    let indoor-flow [agent-indoor-passage-flow] of the-person
+    let outdoor-flow [agent-outdoor-passage-flow] of the-person
+    if global-flow != (indoor-flow + outdoor-flow) [
+      error (word "Agent passage-flow totals disagree for agent " [agent-id] of the-person)
+    ]
+    set rows lput (list [agent-id] of the-person mode-part global-flow indoor-flow outdoor-flow) rows
+  ]
+  csv:to-file (get-safe-output-file-name folder-path base-name) rows
+end
+
+to export-agent-footprint-data [ folder-path ]
+  let mode-part movement-mode
+  if mode-part = "Random OD" [ set mode-part "Random_OD" ]
+  if mode-part = "Purposive OD" [ set mode-part "Purposive_OD" ]
+  let base-name (word "agent_cumulative_footprint_ticks_" mode-part "_" path-calculation-mode)
+  let rows (list (list "agent_id" "mechanism" "global_footprint_ticks" "indoor_footprint_ticks" "outdoor_footprint_ticks"))
+  foreach sort-on [agent-id] persons [ the-person ->
+    let global-ticks [agent-global-footprint] of the-person
+    let indoor-ticks [agent-indoor-footprint] of the-person
+    let outdoor-ticks [agent-outdoor-footprint] of the-person
+    if global-ticks != (indoor-ticks + outdoor-ticks) [
+      error (word "Agent footprint totals disagree for agent " [agent-id] of the-person)
+    ]
+    set rows lput (list
+      [agent-id] of the-person
+      mode-part
+      global-ticks
+      indoor-ticks
+      outdoor-ticks) rows
+  ]
+  csv:to-file (get-safe-output-file-name folder-path base-name) rows
+end
+
+to export-node-visits [ folder-path ]
+  file-close-all
+  let mode-part movement-mode
+  if mode-part = "Purposive OD" [ set mode-part "Purposive_OD" ]
+  let base-name (word "node_visits_" mode-part)
+  let file-name get-safe-output-file-name folder-path base-name
+  
+  let rows (list (list "Node_ID" "X_Coord" "Y_Coord" "Z_Coord" "Node_Degree" "Visit_Count"))
+  
+  foreach sort turtles [ the-node ->
+    let row (list
+      ([numeric-id] of the-node)
+      ([true-x] of the-node)
+      ([true-y] of the-node)
+      ([true-z] of the-node)
+      ([node-degree] of the-node)
+      ([visit-count] of the-node))
+    set rows lput row rows
+  ]
+  csv:to-file file-name rows
+  print (word ">>> Automatically exported: " file-name)
+end
+
+to-report get-output-folder
+  let target-folder "output_data/"
+  if (file-exists? "output_data") or (file-exists? target-folder) [
+    report target-folder
+  ]
+  print ">>> Cannot find output_data folder; exporting CSV files to the model directory."
+  report ""
+end
+
+to-report get-safe-output-file-name [ folder-path base-name ]
+  let file-name (word folder-path base-name ".csv")
+  if file-exists? file-name [
+    let candidate (word folder-path base-name "_t" round ticks "_r" random 1000000 ".csv")
+    while [ file-exists? candidate ] [
+      set candidate (word folder-path base-name "_t" round ticks "_r" random 1000000 ".csv")
+    ]
+    print (word ">>> Existing file found, exporting to: " candidate)
+    set file-name candidate
+  ]
+  report file-name
+end
+
+to update-traffic-heatmap
+  let flow-values []
+  ask links [ let f get-current-flow if f > 0 [ set flow-values lput f flow-values ] ]
+  if length flow-values < 5 [ ask links [ set color white set thickness 0.05 ] stop ]
+  let sorted-flows sort flow-values
+  let total-count length sorted-flows
+  let t1 item (floor (total-count * 0.2)) sorted-flows
+  let t2 item (floor (total-count * 0.4)) sorted-flows
+  let t3 item (floor (total-count * 0.6)) sorted-flows
+  let t4 item (floor (total-count * 0.8)) sorted-flows
+  ask links [
+    let my-flow get-current-flow
+    ifelse my-flow = 0 [ set color 9.9 set thickness 0.05 ]
+    [ ifelse my-flow <= t1 [ set color blue set thickness 0.05 ]
+      [ ifelse my-flow <= t2 [ set color cyan set thickness 0.08 ]
+        [ ifelse my-flow <= t3 [ set color yellow set thickness 0.12 ]
+          [ ifelse my-flow <= t4 [ set color orange set thickness 0.16 ]
+            [ set color red set thickness 0.25 ] ] ] ] ]
+  ]
+end
+
+to reset-link-colors
+  ask links [ set color white set thickness 0.05 ]
+  display
+end
+
+; ----------------------------------------------------------------------
+; ;; --- I. New Algorithm: Least Angular Change & Hybrid Search --- ;;
+; ----------------------------------------------------------------------
+
+to-report find-path-by-angular-change [ start-node end-node ]
+  let open-list []
+  let closed-set table:make
+  set open-list (list (list start-node 0 (list start-node) [] -999))
+
+  while [ not empty? open-list ] [
+    set open-list sort-by [ [a b] -> item 1 a < item 1 b ] open-list
+    let current-state item 0 open-list
+    set open-list but-first open-list
+    let curr-node item 0 current-state
+    let curr-cost item 1 current-state
+    let curr-path-nodes item 2 current-state
+    let curr-path-links item 3 current-state
+    let last-azi item 4 current-state
+    let curr-node-id [who] of curr-node
+
+    if curr-node = end-node [ report (list curr-path-nodes curr-path-links) ]
+
+    let skip? false
+    if table:has-key? closed-set curr-node-id [
+      if table:get closed-set curr-node-id <= curr-cost [ set skip? true ]
+    ]
+
+    if not skip? [
+      table:put closed-set curr-node-id curr-cost
+      ask [my-links] of curr-node [
+        let next-link self
+        let next-node nobody
+        ifelse [end1] of next-link = curr-node
+        [ set next-node [end2] of next-link ]
+        [ set next-node [end1] of next-link ]
+        
+        let next-node-id [who] of next-node
+        let link-azi azimuth
+        let link-len edge-length
+        
+        let turn-cost 0
+        ifelse last-azi != -999 [
+          set turn-cost abs (subtract-headings last-azi link-azi)
+        ] [ set turn-cost 0 ]
+        
+        let new-cost curr-cost + turn-cost + (link-len * 0.01)
+        
+        let new-path-nodes lput next-node curr-path-nodes
+        let new-path-links lput next-link curr-path-links
+        
+        let add-to-list? true
+        if table:has-key? closed-set next-node-id [
+          if table:get closed-set next-node-id <= new-cost [ set add-to-list? false ]
+        ]
+        if add-to-list? [
+          set open-list lput (list next-node new-cost new-path-nodes new-path-links link-azi) open-list
+        ]
+      ]
+    ]
+  ]
+  report [[][]]
+end
+
+to-report find-path-by-hybrid [ start-node end-node ]
+  let open-list []
+  let closed-set table:make
+  set open-list (list (list start-node 0 (list start-node) [] -999))
+
+  while [ not empty? open-list ] [
+    set open-list sort-by [ [a b] -> item 1 a < item 1 b ] open-list
+    let current-state item 0 open-list
+    set open-list but-first open-list
+    let curr-node item 0 current-state
+    let curr-cost item 1 current-state
+    let curr-path-nodes item 2 current-state
+    let curr-path-links item 3 current-state
+    let last-azi item 4 current-state
+    let curr-node-id [who] of curr-node
+
+    if curr-node = end-node [ report (list curr-path-nodes curr-path-links) ]
+
+    let skip? false
+    if table:has-key? closed-set curr-node-id [
+      if table:get closed-set curr-node-id <= curr-cost [ set skip? true ]
+    ]
+
+    if not skip? [
+      table:put closed-set curr-node-id curr-cost
+      ask [my-links] of curr-node [
+        let next-link self
+        let next-node nobody
+        ifelse [end1] of next-link = curr-node
+        [ set next-node [end2] of next-link ]
+        [ set next-node [end1] of next-link ]
+        
+        let next-node-id [who] of next-node
+        let link-azi azimuth
+        let link-len edge-length
+        
+        let turn-cost 0
+        ifelse last-azi != -999 [
+          set turn-cost abs (subtract-headings last-azi link-azi)
+        ] [ set turn-cost 0 ]
+        
+        let weight-angle 0.15
+        let weight-distance 1.0
+        
+        let new-cost curr-cost + (turn-cost * weight-angle) + (link-len * weight-distance)
+        
+        let new-path-nodes lput next-node curr-path-nodes
+        let new-path-links lput next-link curr-path-links
+        
+        let add-to-list? true
+        if table:has-key? closed-set next-node-id [
+          if table:get closed-set next-node-id <= new-cost [ set add-to-list? false ]
+        ]
+        if add-to-list? [
+          set open-list lput (list next-node new-cost new-path-nodes new-path-links link-azi) open-list
+        ]
+      ]
+    ]
+  ]
+  report [[][]]
+end
+
+to-report current-stability-metric
+  if stopping-condition = "None" [ report "N/A" ]
+  if current-metric-value = -1 [ report "Waiting..." ]
+  report precision current-metric-value 6 
+end
+
+to-report raw-stability-metric
+  if stopping-condition = "None" [ report 0 ]
+  if current-metric-value = -1 [ report 0 ]
+  report current-metric-value
+end
+
+to-report correlation-metric-names
+  report ["NQPD" "Bt" "PR"]
+end
+
+to-report get-formal-segment-metric-values
+  report (list link-nqpdcn link-btcn link-pr)
+end
+
+to initialize-formal-segment-tables
+  set formal-segment-footprint-flow-table table:make
+  set formal-segment-passage-flow-table table:make
+  set formal-segment-lower-link-count-table table:make
+  set formal-segment-metric-table table:make
+  set formal-segment-space-table table:make
+  ask links [
+    let segment-id formal-segment-id
+    if is-number? segment-id [
+      let metric-values get-formal-segment-metric-values
+      if not table:has-key? formal-segment-footprint-flow-table segment-id [
+        table:put formal-segment-footprint-flow-table segment-id 0
+        table:put formal-segment-passage-flow-table segment-id 0
+        table:put formal-segment-lower-link-count-table segment-id 0
+        table:put formal-segment-metric-table segment-id metric-values
+        table:put formal-segment-space-table segment-id link-in-outdoor
+      ]
+      if table:get formal-segment-space-table segment-id != link-in-outdoor [
+        error (word "formal_segment_id " segment-id " spans multiple spatial classes")
+      ]
+      table:put formal-segment-lower-link-count-table segment-id ((table:get formal-segment-lower-link-count-table segment-id) + 1)
+    ]
+  ]
+  set formal-segment-ids-list sort table:keys formal-segment-footprint-flow-table
+end
+
+to increment-formal-segment-passage-flow [ amount ]
+  let segment-id formal-segment-id
+  if table:has-key? formal-segment-passage-flow-table segment-id [
+    table:put formal-segment-passage-flow-table segment-id ((table:get formal-segment-passage-flow-table segment-id) + amount)
+  ]
+end
+
+to increment-formal-segment-footprint-flow [ amount ]
+  let segment-id formal-segment-id
+  if table:has-key? formal-segment-footprint-flow-table segment-id [
+    table:put formal-segment-footprint-flow-table segment-id ((table:get formal-segment-footprint-flow-table segment-id) + amount)
+  ]
+end
+
+to-report calculate-formal-segment-passage-pearson-row
+  let results []
+  let metric-indexes n-values (length correlation-metric-names) [ i -> i ]
+  foreach metric-indexes [ metric-index ->
+    let flows []
+    let metrics []
+    foreach formal-segment-ids-list [ segment-id ->
+      let flow table:get formal-segment-passage-flow-table segment-id
+      let metric item metric-index (table:get formal-segment-metric-table segment-id)
+      ; Keep the existing footprint-flow convention: correlate active segments only.
+      if (flow > 0) and (is-number? metric) [
+        set flows lput flow flows
+        set metrics lput metric metrics
+      ]
+    ]
+    ifelse length flows < 2
+      [ set results lput 0 results ]
+      [ set results lput (calculate-pearson flows metrics) results ]
+  ]
+  report results
+end
+
+to-report calculate-formal-segment-footprint-pearson-row
+  let results []
+  let metric-indexes n-values (length correlation-metric-names) [ i -> i ]
+  foreach metric-indexes [ metric-index ->
+    let flows []
+    let metrics []
+    foreach formal-segment-ids-list [ segment-id ->
+      let flow table:get formal-segment-footprint-flow-table segment-id
+      let metric item metric-index (table:get formal-segment-metric-table segment-id)
+      ; Zero-valued morphology is a valid observation; only zero flow is excluded.
+      if (flow > 0) and (is-number? metric) [
+        set flows lput flow flows
+        set metrics lput metric metrics
+      ]
+    ]
+    ifelse length flows < 2
+      [ set results lput 0 results ]
+      [ set results lput (calculate-pearson flows metrics) results ]
+  ]
+  report results
+end
+
+to export-correlation-history [ folder-path ]
+  let mode-part movement-mode
+  if mode-part = "Random OD" [ set mode-part "Random_OD" ]
+  if mode-part = "Purposive OD" [ set mode-part "Purposive_OD" ]
+  let base-name (word "correlation_pearson_r_formal_segment_passage_" mode-part "_" path-calculation-mode)
+  csv:to-file (get-safe-output-file-name folder-path base-name) correlation-passage-pearson-rows
+end
+
+
+
+to go-headless-hybrid
+  if not any? persons [ setup-agents ]
+  ask persons [ move ]
+  tick
+  let passage-pearson-row (fput ticks (calculate-formal-segment-passage-pearson-row))
+  set correlation-passage-pearson-rows lput passage-pearson-row correlation-passage-pearson-rows
+  if ticks >= 20000 [
+    export-all-data
+    stop
+  ]
+end
+
+]]></code>
+  <widgets>
+    <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="-44" height="1520" showTickCounter="true" patchSize="10.0" fontSize="10" wrappingAllowedY="true" width="1480" tickCounterLabel="ticks" maxPycor="107" updateMode="0" frameRate="30.0" maxPzcor="15" maxPxcor="113" minPxcor="-34" minPzcor="-7"></view3d>
+    <button x="70" y="80" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="55">setup</button>
+    <chooser x="195" y="80" height="60" variable="movement-mode" current="1" width="250" display="movement-mode">
+      <choice type="string" value="Simulated"></choice>
+      <choice type="string" value="Random OD"></choice>
+      <choice type="string" value="Purposive OD"></choice>
+    </chooser>
+    <button x="70" y="180" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="55">go</button>
+    <button x="35" y="275" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="115">export-all-data</button>
+    <chooser x="195" y="170" height="60" variable="path-calculation-mode" current="3" width="250" display="path-calculation-mode">
+      <choice type="string" value="Distance"></choice>
+      <choice type="string" value="Angular"></choice>
+      <choice type="string" value="Topological"></choice>
+      <choice type="string" value="Hybrid"></choice>
+    </chooser>
+    <plot x="725" autoPlotX="true" yMax="0.01" autoPlotY="true" yAxis="log10(P(X &gt;= k))" y="80" xMin="0.0" height="260" legend="false" xMax="2.5" yMin="-4.0" width="380" xAxis="log10(k)" display="Power law distribution of Traffic flow">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="2" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+    </plot>
+    <plot x="1150" autoPlotX="true" yMax="0.01" autoPlotY="true" yAxis="Log(Probability)" y="80" xMin="0.0" height="260" legend="false" xMax="2.5" yMin="-4.0" width="390" xAxis="Log(Flow)" display="Traffic flow (Area 0)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="pen-0" color="-16448764" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+    </plot>
+    <note x="865" y="30" backgroundDark="0" fontSize="24" width="150" markdown="false" height="40" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">Global</note>
+    <note x="1295" y="25" backgroundDark="0" fontSize="24" width="150" markdown="false" height="40" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">Outdoor</note>
+    <plot x="735" autoPlotX="true" yMax="0.0" autoPlotY="true" yAxis="Log(BtEn)" y="440" xMin="0.0" height="255" legend="false" xMax="0.0" yMin="0.0" width="380" xAxis="Log(Flow)" display="Correlation between Traffic flow and Metric">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="2" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+    </plot>
+    <monitor x="735" precision="17" y="375" height="60" fontSize="11" width="250" display="R-Square">R-Square-String</monitor>
+    <monitor x="1155" precision="17" y="370" height="60" fontSize="11" width="250" display="Outdoor-R-Square">R-Square-String-Area0</monitor>
+    <plot x="1155" autoPlotX="true" yMax="0.0" autoPlotY="true" yAxis="Log(BtEn)" y="436" xMin="0.0" height="255" legend="false" xMax="0.0" yMin="0.0" width="380" xAxis="Log(Flow)" display="Correlation (Area 0)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="2" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+    </plot>
+    <note x="1725" y="25" backgroundDark="0" fontSize="24" width="150" markdown="false" height="40" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">Indoor</note>
+    <monitor x="1590" precision="17" y="370" height="60" fontSize="11" width="250" display="R-Square-String-Selected">R-Square-String-Selected</monitor>
+    <plot x="1590" autoPlotX="true" yMax="0.0" autoPlotY="true" yAxis="Log(BtEn)" y="435" xMin="0.0" height="255" legend="false" xMax="0.0" yMin="0.0" width="380" xAxis="Log(Flow)" display="Correlation (Selected Area)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="2" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+    </plot>
+    <chooser x="195" y="265" height="60" variable="stopping-condition" current="3" width="250" display="stopping-condition">
+      <choice type="string" value="None"></choice>
+      <choice type="string" value="RMSE"></choice>
+      <choice type="string" value="Shannon Entropy"></choice>
+      <choice type="string" value="Correlation_BtCn"></choice>
+      <choice type="string" value="Correlation_WPR"></choice>
+    </chooser>
+    <button x="30" y="360" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="130" display="color-by-metric">color-by-metric</button>
+    <slider x="15" step="1" y="425" max="100" width="155" display="agent-speed" height="50" min="0" direction="Horizontal" default="1.0" variable="agent-speed"></slider>
+    <button x="50" y="495" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="70">test-path</button>
+    <button x="45" y="555" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="76" display="clear map">reset-link-colors</button>
+    <button x="25" y="605" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="115">export-flow-data</button>
+    <button x="5" y="660" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="151" display="Real-time Heatmap">update-traffic-heatmap</button>
+    <chooser x="195" y="445" height="60" variable="correlation-method" current="1" width="250" display="correlation-method">
+      <choice type="string" value="Power 0.25"></choice>
+      <choice type="string" value="Log-Log"></choice>
+      <choice type="string" value="Spearman"></choice>
+    </chooser>
+    <plot x="1590" autoPlotX="true" yMax="0.01" autoPlotY="true" yAxis="Log(Probability)" y="80" xMin="0.0" height="260" legend="false" xMax="2.5" yMin="-4.0" width="390" xAxis="Log(Flow)" display="Traffic flow (Selected Area)">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="pen-0" color="-16448764" legend="true">
+        <setup></setup>
+        <update></update>
+      </pen>
+    </plot>
+    <plot x="2020" autoPlotX="true" yMax="0.5" autoPlotY="true" y="80" xMin="0.0" height="260" legend="false" xMax="10.0" yMin="0.0" width="370" display="Convergence Monitor">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="default" color="-16777216" legend="true">
+        <setup></setup>
+        <update>plot raw-stability-metric</update>
+      </pen>
+    </plot>
+    <monitor x="500" precision="17" y="80" height="60" fontSize="11" width="175" display="stopping-condition">current-stability-metric</monitor>
+    <chooser x="5" y="720" height="60" variable="selected-metric" current="7" width="250" display="selected-metric">
+      <choice type="string" value="NQPDE100"></choice>
+      <choice type="string" value="BtE100"></choice>
+      <choice type="string" value="NQPDE200"></choice>
+      <choice type="string" value="BtE200"></choice>
+      <choice type="string" value="NQPDE300"></choice>
+      <choice type="string" value="BtE300"></choice>
+      <choice type="string" value="NQPDE400"></choice>
+      <choice type="string" value="BtE400"></choice>
+      <choice type="string" value="NQPDE500"></choice>
+      <choice type="string" value="BtE500"></choice>
+      <choice type="string" value="NQPDE600"></choice>
+      <choice type="string" value="BtE600"></choice>
+      <choice type="string" value="NQPDEn"></choice>
+      <choice type="string" value="BtEn"></choice>
+      <choice type="string" value="weighted-page-rank"></choice>
+      <choice type="string" value="edge-length"></choice>
+    </chooser>
+    <chooser x="195" y="530" height="60" variable="analysis-metric" current="3" width="250" display="analysis-metric">
+      <choice type="string" value="weighted-page-rank"></choice>
+      <choice type="string" value="edge-length"></choice>
+      <choice type="string" value="azimuth"></choice>
+      <choice type="string" value="link-btcn"></choice>
+    </chooser>
+    <chooser x="195" y="720" height="60" variable="selected-area-name" current="6" width="250" display="selected-area-name">
+      <choice type="string" value="north_library"></choice>
+      <choice type="string" value="south_library"></choice>
+      <choice type="string" value="teaching_building_1"></choice>
+      <choice type="string" value="canteen_1"></choice>
+      <choice type="string" value="gym"></choice>
+      <choice type="string" value="sports_field"></choice>
+      <choice type="string" value="huixing_building"></choice>
+      <choice type="string" value="teaching_building"></choice>
+      <choice type="string" value="teaching_building_3"></choice>
+      <choice type="string" value="canteen_2"></choice>
+      <choice type="string" value="dormitory_1"></choice>
+      <choice type="string" value="dormitory_2"></choice>
+      <choice type="string" value="dormitory_3"></choice>
+      <choice type="string" value="wenshan_lake_park"></choice>
+      <choice type="string" value="dujuan_hill_park"></choice>
+      <choice type="string" value="lawn_1"></choice>
+      <choice type="string" value="lawn_2"></choice>
+      <choice type="string" value="music_space"></choice>
+      <choice type="string" value="south_gate"></choice>
+      <choice type="string" value="little_west_gate"></choice>
+      <choice type="string" value="west_gate"></choice>
+      <choice type="string" value="north_gate"></choice>
+      <choice type="string" value="east_gate"></choice>
+      <choice type="string" value="office_building"></choice>
+    </chooser>
+  </widgets>
+  <info>## WHAT IS IT?
+
+(a general understanding of what the model is trying to show or explain)
+
+## HOW IT WORKS
+
+(what rules the agents use to create the overall behavior of the model)
+
+## HOW TO USE IT
+
+(how to use the model, including a description of each of the items in the Interface tab)
+
+## THINGS TO NOTICE
+
+(suggested things for the user to notice while running the model)
+
+## THINGS TO TRY
+
+(suggested things for the user to try to do (move sliders, switches, etc.) with the model)
+
+## EXTENDING THE MODEL
+
+(suggested things to add or change in the Code tab to make the model more complicated, detailed, accurate, etc.)
+
+## NETLOGO FEATURES
+
+(interesting or unusual features of NetLogo that the model uses, particularly in the Code tab; or where workarounds were needed for missing features)
+
+## RELATED MODELS
+
+(models in the NetLogo Models Library and elsewhere which are of related interest)
+
+## CREDITS AND REFERENCES
+
+(a reference to the model's URL on the web if it has one, as well as any other necessary credits, citations, and links)
+</info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="airplane" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="135" y="15"></point>
+        <point x="120" y="60"></point>
+        <point x="120" y="105"></point>
+        <point x="15" y="165"></point>
+        <point x="15" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="135" y="240"></point>
+        <point x="105" y="270"></point>
+        <point x="120" y="285"></point>
+        <point x="150" y="270"></point>
+        <point x="180" y="285"></point>
+        <point x="210" y="270"></point>
+        <point x="165" y="240"></point>
+        <point x="180" y="180"></point>
+        <point x="285" y="195"></point>
+        <point x="285" y="165"></point>
+        <point x="180" y="105"></point>
+        <point x="180" y="60"></point>
+        <point x="165" y="15"></point>
+      </polygon>
+    </shape>
+    <shape name="arrow" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="0" y="150"></point>
+        <point x="105" y="150"></point>
+        <point x="105" y="293"></point>
+        <point x="195" y="293"></point>
+        <point x="195" y="150"></point>
+        <point x="300" y="150"></point>
+      </polygon>
+    </shape>
+    <shape name="box" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="285"></point>
+        <point x="285" y="225"></point>
+        <point x="285" y="75"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="135"></point>
+        <point x="15" y="75"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="75"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="75"></point>
+        <point x="15" y="225"></point>
+        <point x="150" y="285"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <line endX="150" startY="285" marked="false" color="255" endY="135" startX="150"></line>
+      <line endX="15" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+      <line endX="285" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+    </shape>
+    <shape name="bug" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+    </shape>
+    <shape name="butterfly" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="209" y="199"></point>
+        <point x="225" y="225"></point>
+        <point x="225" y="255"></point>
+        <point x="195" y="270"></point>
+        <point x="165" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="89" y="198"></point>
+        <point x="75" y="225"></point>
+        <point x="75" y="255"></point>
+        <point x="105" y="270"></point>
+        <point x="135" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="139" y="148"></point>
+        <point x="100" y="105"></point>
+        <point x="55" y="90"></point>
+        <point x="25" y="90"></point>
+        <point x="10" y="105"></point>
+        <point x="10" y="135"></point>
+        <point x="25" y="180"></point>
+        <point x="40" y="195"></point>
+        <point x="85" y="194"></point>
+        <point x="139" y="163"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="162" y="150"></point>
+        <point x="200" y="105"></point>
+        <point x="245" y="90"></point>
+        <point x="275" y="90"></point>
+        <point x="290" y="105"></point>
+        <point x="290" y="135"></point>
+        <point x="275" y="180"></point>
+        <point x="260" y="195"></point>
+        <point x="215" y="195"></point>
+        <point x="162" y="165"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="135" y="225"></point>
+        <point x="120" y="150"></point>
+        <point x="135" y="120"></point>
+        <point x="150" y="105"></point>
+        <point x="165" y="120"></point>
+        <point x="180" y="150"></point>
+        <point x="165" y="225"></point>
+      </polygon>
+      <circle x="135" y="90" marked="false" color="255" diameter="30" filled="true"></circle>
+      <line endX="195" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+      <line endX="105" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+    </shape>
+    <shape name="car" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="300" y="180"></point>
+        <point x="279" y="164"></point>
+        <point x="261" y="144"></point>
+        <point x="240" y="135"></point>
+        <point x="226" y="132"></point>
+        <point x="213" y="106"></point>
+        <point x="203" y="84"></point>
+        <point x="185" y="63"></point>
+        <point x="159" y="50"></point>
+        <point x="135" y="50"></point>
+        <point x="75" y="60"></point>
+        <point x="0" y="150"></point>
+        <point x="0" y="165"></point>
+        <point x="0" y="225"></point>
+        <point x="300" y="225"></point>
+        <point x="300" y="180"></point>
+      </polygon>
+      <circle x="180" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <circle x="30" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="162" y="80"></point>
+        <point x="132" y="78"></point>
+        <point x="134" y="135"></point>
+        <point x="209" y="135"></point>
+        <point x="194" y="105"></point>
+        <point x="189" y="96"></point>
+        <point x="180" y="89"></point>
+      </polygon>
+      <circle x="47" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+      <circle x="195" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="circle 2" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+    </shape>
+    <shape name="cow" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="200" y="193"></point>
+        <point x="197" y="249"></point>
+        <point x="179" y="249"></point>
+        <point x="177" y="196"></point>
+        <point x="166" y="187"></point>
+        <point x="140" y="189"></point>
+        <point x="93" y="191"></point>
+        <point x="78" y="179"></point>
+        <point x="72" y="211"></point>
+        <point x="49" y="209"></point>
+        <point x="48" y="181"></point>
+        <point x="37" y="149"></point>
+        <point x="25" y="120"></point>
+        <point x="25" y="89"></point>
+        <point x="45" y="72"></point>
+        <point x="103" y="84"></point>
+        <point x="179" y="75"></point>
+        <point x="198" y="76"></point>
+        <point x="252" y="64"></point>
+        <point x="272" y="81"></point>
+        <point x="293" y="103"></point>
+        <point x="285" y="121"></point>
+        <point x="255" y="121"></point>
+        <point x="242" y="118"></point>
+        <point x="224" y="167"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="73" y="210"></point>
+        <point x="86" y="251"></point>
+        <point x="62" y="249"></point>
+        <point x="48" y="208"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="25" y="114"></point>
+        <point x="16" y="195"></point>
+        <point x="9" y="204"></point>
+        <point x="23" y="213"></point>
+        <point x="25" y="200"></point>
+        <point x="39" y="123"></point>
+      </polygon>
+    </shape>
+    <shape name="cylinder" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="dot" rotatable="false" editableColorIndex="0">
+      <circle x="90" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+    </shape>
+    <shape name="face happy" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="90" y="239"></point>
+        <point x="62" y="213"></point>
+        <point x="47" y="191"></point>
+        <point x="67" y="179"></point>
+        <point x="90" y="203"></point>
+        <point x="109" y="218"></point>
+        <point x="150" y="225"></point>
+        <point x="192" y="218"></point>
+        <point x="210" y="203"></point>
+        <point x="227" y="181"></point>
+        <point x="251" y="194"></point>
+        <point x="236" y="217"></point>
+        <point x="212" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="face neutral" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="7" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <rectangle endX="240" startY="195" marked="false" color="255" endY="225" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="face sad" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="168"></point>
+        <point x="90" y="184"></point>
+        <point x="62" y="210"></point>
+        <point x="47" y="232"></point>
+        <point x="67" y="244"></point>
+        <point x="90" y="220"></point>
+        <point x="109" y="205"></point>
+        <point x="150" y="198"></point>
+        <point x="192" y="205"></point>
+        <point x="210" y="220"></point>
+        <point x="227" y="242"></point>
+        <point x="251" y="229"></point>
+        <point x="236" y="206"></point>
+        <point x="212" y="183"></point>
+      </polygon>
+    </shape>
+    <shape name="fish" rotatable="false" editableColorIndex="0">
+      <polygon color="-1" filled="true" marked="false">
+        <point x="44" y="131"></point>
+        <point x="21" y="87"></point>
+        <point x="15" y="86"></point>
+        <point x="0" y="120"></point>
+        <point x="15" y="150"></point>
+        <point x="0" y="180"></point>
+        <point x="13" y="214"></point>
+        <point x="20" y="212"></point>
+        <point x="45" y="166"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="135" y="195"></point>
+        <point x="119" y="235"></point>
+        <point x="95" y="218"></point>
+        <point x="76" y="210"></point>
+        <point x="46" y="204"></point>
+        <point x="60" y="165"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="75" y="45"></point>
+        <point x="83" y="77"></point>
+        <point x="71" y="103"></point>
+        <point x="86" y="114"></point>
+        <point x="166" y="78"></point>
+        <point x="135" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="136"></point>
+        <point x="151" y="77"></point>
+        <point x="226" y="81"></point>
+        <point x="280" y="119"></point>
+        <point x="292" y="146"></point>
+        <point x="292" y="160"></point>
+        <point x="287" y="170"></point>
+        <point x="270" y="195"></point>
+        <point x="195" y="210"></point>
+        <point x="151" y="212"></point>
+        <point x="30" y="166"></point>
+      </polygon>
+      <circle x="215" y="106" marked="false" color="255" diameter="30" filled="true"></circle>
+    </shape>
+    <shape name="flag" rotatable="false" editableColorIndex="0">
+      <rectangle endX="75" startY="15" marked="true" color="-1920102913" endY="300" startX="60" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="150"></point>
+        <point x="270" y="90"></point>
+        <point x="90" y="30"></point>
+      </polygon>
+      <line endX="90" startY="135" marked="true" color="-1920102913" endY="135" startX="75"></line>
+      <line endX="90" startY="45" marked="true" color="-1920102913" endY="45" startX="75"></line>
+    </shape>
+    <shape name="flower" rotatable="false" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="135" y="120"></point>
+        <point x="165" y="165"></point>
+        <point x="180" y="210"></point>
+        <point x="180" y="240"></point>
+        <point x="150" y="300"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="240"></point>
+        <point x="195" y="195"></point>
+        <point x="165" y="135"></point>
+      </polygon>
+      <circle x="85" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="147" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="192" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="85" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="70" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="25" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="96" y="51" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="113" y="68" marked="false" color="255" diameter="74" filled="true"></circle>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="189" y="233"></point>
+        <point x="219" y="188"></point>
+        <point x="249" y="173"></point>
+        <point x="279" y="188"></point>
+        <point x="234" y="218"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="180" y="255"></point>
+        <point x="150" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="75" y="240"></point>
+        <point x="135" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="house" rotatable="false" editableColorIndex="0">
+      <rectangle endX="255" startY="120" marked="true" color="-1920102913" endY="285" startX="45" filled="true"></rectangle>
+      <rectangle endX="180" startY="210" marked="false" color="255" endY="285" startX="120" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="120"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+      <line endX="270" startY="120" marked="false" color="255" endY="120" startX="30"></line>
+    </shape>
+    <shape name="leaf" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="210"></point>
+        <point x="135" y="195"></point>
+        <point x="120" y="210"></point>
+        <point x="60" y="210"></point>
+        <point x="30" y="195"></point>
+        <point x="60" y="180"></point>
+        <point x="60" y="165"></point>
+        <point x="15" y="135"></point>
+        <point x="30" y="120"></point>
+        <point x="15" y="105"></point>
+        <point x="40" y="104"></point>
+        <point x="45" y="90"></point>
+        <point x="60" y="90"></point>
+        <point x="90" y="105"></point>
+        <point x="105" y="120"></point>
+        <point x="120" y="120"></point>
+        <point x="105" y="60"></point>
+        <point x="120" y="60"></point>
+        <point x="135" y="30"></point>
+        <point x="150" y="15"></point>
+        <point x="165" y="30"></point>
+        <point x="180" y="60"></point>
+        <point x="195" y="60"></point>
+        <point x="180" y="120"></point>
+        <point x="195" y="120"></point>
+        <point x="210" y="105"></point>
+        <point x="240" y="90"></point>
+        <point x="255" y="90"></point>
+        <point x="263" y="104"></point>
+        <point x="285" y="105"></point>
+        <point x="270" y="120"></point>
+        <point x="285" y="135"></point>
+        <point x="240" y="165"></point>
+        <point x="240" y="180"></point>
+        <point x="270" y="195"></point>
+        <point x="240" y="210"></point>
+        <point x="180" y="210"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="195"></point>
+        <point x="135" y="240"></point>
+        <point x="120" y="255"></point>
+        <point x="105" y="255"></point>
+        <point x="105" y="285"></point>
+        <point x="135" y="285"></point>
+        <point x="165" y="240"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+    </shape>
+    <shape name="line" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="300" startX="150"></line>
+    </shape>
+    <shape name="line half" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="150" startX="150"></line>
+    </shape>
+    <shape name="pentagon" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="15"></point>
+        <point x="15" y="120"></point>
+        <point x="60" y="285"></point>
+        <point x="240" y="285"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+    </shape>
+    <shape name="person" rotatable="false" editableColorIndex="0">
+      <circle x="110" y="5" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="120" y="195"></point>
+        <point x="90" y="285"></point>
+        <point x="105" y="300"></point>
+        <point x="135" y="300"></point>
+        <point x="150" y="225"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="300"></point>
+        <point x="210" y="285"></point>
+        <point x="180" y="195"></point>
+        <point x="195" y="90"></point>
+      </polygon>
+      <rectangle endX="172" startY="79" marked="true" color="-1920102913" endY="94" startX="127" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="195" y="90"></point>
+        <point x="240" y="150"></point>
+        <point x="225" y="180"></point>
+        <point x="165" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="60" y="150"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="105"></point>
+      </polygon>
+    </shape>
+    <shape name="plant" rotatable="false" editableColorIndex="0">
+      <rectangle endX="165" startY="90" marked="true" color="-1920102913" endY="300" startX="135" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="255"></point>
+        <point x="90" y="210"></point>
+        <point x="45" y="195"></point>
+        <point x="75" y="255"></point>
+        <point x="135" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="255"></point>
+        <point x="210" y="210"></point>
+        <point x="255" y="195"></point>
+        <point x="225" y="255"></point>
+        <point x="165" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="180"></point>
+        <point x="90" y="135"></point>
+        <point x="45" y="120"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="180"></point>
+        <point x="165" y="210"></point>
+        <point x="225" y="180"></point>
+        <point x="255" y="120"></point>
+        <point x="210" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="105"></point>
+        <point x="90" y="60"></point>
+        <point x="45" y="45"></point>
+        <point x="75" y="105"></point>
+        <point x="135" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="105"></point>
+        <point x="165" y="135"></point>
+        <point x="225" y="105"></point>
+        <point x="255" y="45"></point>
+        <point x="210" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="90"></point>
+        <point x="120" y="45"></point>
+        <point x="150" y="15"></point>
+        <point x="180" y="45"></point>
+        <point x="165" y="90"></point>
+      </polygon>
+    </shape>
+    <shape name="sheep" rotatable="false" editableColorIndex="15">
+      <circle x="203" y="65" marked="true" color="-1" diameter="88" filled="true"></circle>
+      <circle x="70" y="65" marked="true" color="-1" diameter="162" filled="true"></circle>
+      <circle x="150" y="105" marked="true" color="-1" diameter="120" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="218" y="120"></point>
+        <point x="240" y="165"></point>
+        <point x="255" y="165"></point>
+        <point x="278" y="120"></point>
+      </polygon>
+      <circle x="214" y="72" marked="false" color="-1920102913" diameter="67" filled="true"></circle>
+      <rectangle endX="179" startY="223" marked="true" color="-1" endY="298" startX="164" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="45" y="285"></point>
+        <point x="30" y="285"></point>
+        <point x="30" y="240"></point>
+        <point x="15" y="195"></point>
+        <point x="45" y="210"></point>
+      </polygon>
+      <circle x="3" y="83" marked="true" color="-1" diameter="150" filled="true"></circle>
+      <rectangle endX="80" startY="221" marked="true" color="-1" endY="296" startX="65" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="195" y="285"></point>
+        <point x="210" y="285"></point>
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="195" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="276" y="85"></point>
+        <point x="285" y="105"></point>
+        <point x="302" y="99"></point>
+        <point x="294" y="83"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="219" y="85"></point>
+        <point x="210" y="105"></point>
+        <point x="193" y="99"></point>
+        <point x="201" y="83"></point>
+      </polygon>
+    </shape>
+    <shape name="square" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+    </shape>
+    <shape name="square 2" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+      <rectangle endX="240" startY="60" marked="false" color="255" endY="240" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="star" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="1"></point>
+        <point x="185" y="108"></point>
+        <point x="298" y="108"></point>
+        <point x="207" y="175"></point>
+        <point x="242" y="282"></point>
+        <point x="151" y="216"></point>
+        <point x="59" y="282"></point>
+        <point x="94" y="175"></point>
+        <point x="3" y="108"></point>
+        <point x="116" y="108"></point>
+      </polygon>
+    </shape>
+    <shape name="target" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <circle x="60" y="60" marked="true" color="-1920102913" diameter="180" filled="true"></circle>
+      <circle x="90" y="90" marked="false" color="255" diameter="120" filled="true"></circle>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+    </shape>
+    <shape name="tree" rotatable="false" editableColorIndex="0">
+      <circle x="118" y="3" marked="true" color="-1920102913" diameter="94" filled="true"></circle>
+      <rectangle endX="180" startY="195" marked="false" color="-1653716737" endY="300" startX="120" filled="true"></rectangle>
+      <circle x="65" y="21" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="116" y="41" marked="true" color="-1920102913" diameter="127" filled="true"></circle>
+      <circle x="45" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+      <circle x="104" y="74" marked="true" color="-1920102913" diameter="152" filled="true"></circle>
+    </shape>
+    <shape name="triangle" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+    </shape>
+    <shape name="triangle 2" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="151" y="99"></point>
+        <point x="225" y="223"></point>
+        <point x="75" y="224"></point>
+      </polygon>
+    </shape>
+    <shape name="truck" rotatable="false" editableColorIndex="0">
+      <rectangle endX="195" startY="45" marked="true" color="-1920102913" endY="187" startX="4" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="296" y="193"></point>
+        <point x="296" y="150"></point>
+        <point x="259" y="134"></point>
+        <point x="244" y="104"></point>
+        <point x="208" y="104"></point>
+        <point x="207" y="194"></point>
+      </polygon>
+      <rectangle endX="195" startY="60" marked="false" color="-1" endY="105" startX="195" filled="true"></rectangle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="238" y="112"></point>
+        <point x="252" y="141"></point>
+        <point x="219" y="141"></point>
+        <point x="218" y="112"></point>
+      </polygon>
+      <circle x="234" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <rectangle endX="214" startY="185" marked="true" color="-1920102913" endY="194" startX="181" filled="true"></rectangle>
+      <circle x="144" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="144" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="234" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+    </shape>
+    <shape name="turtle" rotatable="true" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="215" y="204"></point>
+        <point x="240" y="233"></point>
+        <point x="246" y="254"></point>
+        <point x="228" y="266"></point>
+        <point x="215" y="252"></point>
+        <point x="193" y="210"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="195" y="90"></point>
+        <point x="225" y="75"></point>
+        <point x="245" y="75"></point>
+        <point x="260" y="89"></point>
+        <point x="269" y="108"></point>
+        <point x="261" y="124"></point>
+        <point x="240" y="105"></point>
+        <point x="225" y="105"></point>
+        <point x="210" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="105" y="90"></point>
+        <point x="75" y="75"></point>
+        <point x="55" y="75"></point>
+        <point x="40" y="89"></point>
+        <point x="31" y="108"></point>
+        <point x="39" y="124"></point>
+        <point x="60" y="105"></point>
+        <point x="75" y="105"></point>
+        <point x="90" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="132" y="85"></point>
+        <point x="134" y="64"></point>
+        <point x="107" y="51"></point>
+        <point x="108" y="17"></point>
+        <point x="150" y="2"></point>
+        <point x="192" y="18"></point>
+        <point x="192" y="52"></point>
+        <point x="169" y="65"></point>
+        <point x="172" y="87"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="85" y="204"></point>
+        <point x="60" y="233"></point>
+        <point x="54" y="254"></point>
+        <point x="72" y="266"></point>
+        <point x="85" y="252"></point>
+        <point x="107" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="119" y="75"></point>
+        <point x="179" y="75"></point>
+        <point x="209" y="101"></point>
+        <point x="224" y="135"></point>
+        <point x="220" y="225"></point>
+        <point x="175" y="261"></point>
+        <point x="128" y="261"></point>
+        <point x="81" y="224"></point>
+        <point x="74" y="135"></point>
+        <point x="88" y="99"></point>
+      </polygon>
+    </shape>
+    <shape name="wheel" rotatable="false" editableColorIndex="0">
+      <circle x="3" y="3" marked="true" color="-1920102913" diameter="294" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <line endX="150" startY="285" marked="true" color="-1920102913" endY="15" startX="150"></line>
+      <line endX="285" startY="150" marked="true" color="-1920102913" endY="150" startX="15"></line>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+      <line endX="79" startY="40" marked="true" color="-1920102913" endY="269" startX="216"></line>
+      <line endX="269" startY="84" marked="true" color="-1920102913" endY="221" startX="40"></line>
+      <line endX="269" startY="216" marked="true" color="-1920102913" endY="79" startX="40"></line>
+      <line endX="221" startY="40" marked="true" color="-1920102913" endY="269" startX="84"></line>
+    </shape>
+    <shape name="wolf" rotatable="false" editableColorIndex="0">
+      <polygon color="255" filled="true" marked="false">
+        <point x="253" y="133"></point>
+        <point x="245" y="131"></point>
+        <point x="245" y="133"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="2" y="194"></point>
+        <point x="13" y="197"></point>
+        <point x="30" y="191"></point>
+        <point x="38" y="193"></point>
+        <point x="38" y="205"></point>
+        <point x="20" y="226"></point>
+        <point x="20" y="257"></point>
+        <point x="27" y="265"></point>
+        <point x="38" y="266"></point>
+        <point x="40" y="260"></point>
+        <point x="31" y="253"></point>
+        <point x="31" y="230"></point>
+        <point x="60" y="206"></point>
+        <point x="68" y="198"></point>
+        <point x="75" y="209"></point>
+        <point x="66" y="228"></point>
+        <point x="65" y="243"></point>
+        <point x="82" y="261"></point>
+        <point x="84" y="268"></point>
+        <point x="100" y="267"></point>
+        <point x="103" y="261"></point>
+        <point x="77" y="239"></point>
+        <point x="79" y="231"></point>
+        <point x="100" y="207"></point>
+        <point x="98" y="196"></point>
+        <point x="119" y="201"></point>
+        <point x="143" y="202"></point>
+        <point x="160" y="195"></point>
+        <point x="166" y="210"></point>
+        <point x="172" y="213"></point>
+        <point x="173" y="238"></point>
+        <point x="167" y="251"></point>
+        <point x="160" y="248"></point>
+        <point x="154" y="265"></point>
+        <point x="169" y="264"></point>
+        <point x="178" y="247"></point>
+        <point x="186" y="240"></point>
+        <point x="198" y="260"></point>
+        <point x="200" y="271"></point>
+        <point x="217" y="271"></point>
+        <point x="219" y="262"></point>
+        <point x="207" y="258"></point>
+        <point x="195" y="230"></point>
+        <point x="192" y="198"></point>
+        <point x="210" y="184"></point>
+        <point x="227" y="164"></point>
+        <point x="242" y="144"></point>
+        <point x="259" y="145"></point>
+        <point x="284" y="151"></point>
+        <point x="277" y="141"></point>
+        <point x="293" y="140"></point>
+        <point x="299" y="134"></point>
+        <point x="297" y="127"></point>
+        <point x="273" y="119"></point>
+        <point x="270" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="-1" y="195"></point>
+        <point x="14" y="180"></point>
+        <point x="36" y="166"></point>
+        <point x="40" y="153"></point>
+        <point x="53" y="140"></point>
+        <point x="82" y="131"></point>
+        <point x="134" y="133"></point>
+        <point x="159" y="126"></point>
+        <point x="188" y="115"></point>
+        <point x="227" y="108"></point>
+        <point x="236" y="102"></point>
+        <point x="238" y="98"></point>
+        <point x="268" y="86"></point>
+        <point x="269" y="92"></point>
+        <point x="281" y="87"></point>
+        <point x="269" y="103"></point>
+        <point x="269" y="113"></point>
+      </polygon>
+    </shape>
+    <shape name="x" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="270" y="75"></point>
+        <point x="225" y="30"></point>
+        <point x="30" y="225"></point>
+        <point x="75" y="270"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="75"></point>
+        <point x="75" y="30"></point>
+        <point x="270" y="225"></point>
+        <point x="225" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>setup repeat 75 [ go ]</previewCommands>
+  <experiments>
+    <experiment name="hybrid_run" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="20000">
+      <setup>random-seed 2026092701 setup</setup>
+      <go>go-headless-hybrid</go>
+      <exitCondition>ticks &gt;= 20000</exitCondition>
+      <metrics>
+        <metric>ticks</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="movement-mode">
+          <value value="&quot;Random OD&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="path-calculation-mode">
+          <value value="&quot;Hybrid&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="stopping-condition">
+          <value value="&quot;Correlation_BtCn&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="agent-speed">
+          <value value="0.1"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
+</model>
+
