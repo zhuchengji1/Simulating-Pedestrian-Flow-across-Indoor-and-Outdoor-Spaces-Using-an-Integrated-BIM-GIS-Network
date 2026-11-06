@@ -1,0 +1,11 @@
+data/
+*.ifc
+*.ifczip
+*.shp
+*.shx
+*.dbf
+*.gpkg
+.env
+__pycache__/
+*.pyc
+reproduced_outputs/
