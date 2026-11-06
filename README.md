@@ -12,6 +12,7 @@ The public release is intentionally minimal. It documents the core workflow with
 | `code/01_network_construction/prepare_integrated_pedestrian_network_for_netlogo.py` | Converts a prepared pedestrian network into the input form required by NetLogo. |
 | `code/02_simulation/run_random_passage_flow_simulation_20000_ticks.py` | Runs the public Random mechanism for 20,000 ticks and validates the exported passage-flow totals. |
 | `code/02_simulation/models/random_movement_passage_flow_20000_ticks.nlogox3d` | NetLogo 3D model for the Random movement mechanism. |
+| `examples/` | A standalone synthetic NetLogo example and fictional input data demonstrating passage-flow counting. |
 | `results/published_tables/` | Machine-readable versions of Tables 4-8 in the manuscript. |
 | `docs/DATA_AVAILABILITY.md` | Data availability statement. |
 | `docs/INPUT_REQUIREMENTS.md` | Requirements for the restricted input network. |
@@ -79,3 +80,4 @@ Please cite the associated Simcampus3D manuscript or its final published version
 ## License and attribution
 
 See `LICENSE_NOTICE.md` for code-use notes and OpenStreetMap attribution requirements.
+
