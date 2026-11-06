@@ -56,9 +56,9 @@ to load-synthetic-nodes
   foreach rows [ row ->
     create-nodes 1 [
       set node-id item 0 row
-      setxy (item 1 row) (item 2 row)
-      set node-space-type item 3 row
-      set place-label item 4 row
+      setxyz (item 1 row) (item 2 row) (item 3 row)
+      set node-space-type item 4 row
+      set place-label item 5 row
       set size 1.25
       set color black
       table:put node-by-id node-id self
