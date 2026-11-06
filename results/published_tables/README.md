@@ -8,4 +8,5 @@ Each CSV in this directory reproduces the displayed values of the corresponding 
 - `Table_07_Likelihood_Ratio_Comparison_of_Power_Law_and_Power_Law_with_Exponential_Cutoff.csv`: manuscript Table 7
 - `Table_08_Power_Law_with_Exponential_Cutoff_Parameter_Estimates_and_Goodness_of_Fit.csv`: manuscript Table 8
 
-The CSVs are summary outputs only. They do not contain coordinates, network identifiers, trajectories, raw structure metrics, or raw flow records.
+These table CSVs are summary outputs only. They do not contain coordinates, network identifiers, trajectories, raw structure metrics, or raw flow records. The separate `data/` directory contains only the anonymized Random passage-flow vector described in `data/README.md`.
+
