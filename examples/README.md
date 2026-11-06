@@ -6,8 +6,8 @@ This directory provides a minimal, fully fictional example of the passage-flow a
 
 - `netlogo/passage_flow_sample.nlogox3d`: standalone NetLogo 7 model with `setup`, `go`, and `export-results` controls.
 - `netlogo/passage_flow_sample.nls`: model source code.
-- `sample_data/synthetic_nodes.csv`: eight fictional nodes.
-- `sample_data/synthetic_segments.csv`: seven fictional segments and their indoor/outdoor labels.
+- `sample_data/synthetic_nodes.csv`: 27 fictional nodes arranged as a 3 by 3 by 3 cubic lattice.
+- `sample_data/synthetic_segments.csv`: 54 fictional segments and their indoor/outdoor labels.
 - `sample_data/synthetic_od_routes.csv`: five fictional OD routes represented by ordered node lists.
 
 ## Passage-flow rule
