@@ -1,0 +1,3 @@
+# Data availability
+
+Outdoor road and path data are available from OpenStreetMap. Point-of-interest data were obtained through the Amap API, subject to its access conditions. Population inputs for the simulations were estimated from annual admissions announcements and staff information publicly available on the Shenzhen University website. The BIM/IFC building models and the integrated pedestrian network derived from them cannot be made publicly available because they contain institutionally restricted building information. The simulated passage-flow data supporting the analyses are available from the corresponding author upon reasonable request.
