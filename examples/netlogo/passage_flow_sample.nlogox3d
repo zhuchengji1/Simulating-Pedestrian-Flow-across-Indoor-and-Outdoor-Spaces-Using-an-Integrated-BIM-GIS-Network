@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 3D 7.0.4" snapToGrid="true">
+  <code><![CDATA[
+__includes ["passage_flow_sample.nls"]
+]]></code>
+  <widgets>
+    <view3d wrappingAllowedZ="false" x="0" wrappingAllowedX="false" y="0" minPycor="-8" height="480" showTickCounter="true" patchSize="20.0" fontSize="10" wrappingAllowedY="false" width="650" tickCounterLabel="ticks" maxPycor="8" updateMode="0" frameRate="30.0" maxPzcor="8" maxPxcor="8" minPxcor="-8" minPzcor="-8"></view3d>
+    <button x="680" y="30" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="120">setup</button>
+    <button x="680" y="85" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="120">go</button>
+    <button x="680" y="140" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="120">export-results</button>
+    <slider x="680" step="1" y="205" max="100" width="220" display="number-of-agents" height="50" min="1" direction="Horizontal" default="30" variable="number-of-agents"></slider>
+    <slider x="680" step="1" y="275" max="500" width="220" display="max-ticks" height="50" min="1" direction="Horizontal" default="100" variable="max-ticks"></slider>
+    <monitor x="680" precision="0" y="345" height="55" fontSize="11" width="220" display="Total passage flow">total-passage-flow</monitor>
+    <note x="680" y="420" backgroundDark="0" fontSize="11" width="270" markdown="false" height="50" textColorDark="-1" textColorLight="-16777216" backgroundLight="0">Synthetic demonstration only. It contains no empirical network or flow data.</note>
+  </widgets>
+  <info>## WHAT IS IT?
+
+This is a small synthetic example of passage-flow counting. It contains eight fictional nodes, seven fictional segments and five illustrative origin-destination routes.
+
+## HOW IT WORKS
+
+Each person moves one link per tick along a pre-defined sample route. When a person changes from its previous segment A to a current segment B, the passage flow of B increases by one. The model also records each person's global, indoor and outdoor passage-flow totals.
+
+## HOW TO USE IT
+
+1. Open this file in NetLogo 7.
+2. Click setup.
+3. Click go. The model stops after max-ticks.
+4. Click export-results to write synthetic_segment_passage_flow.csv and synthetic_agent_passage_flow.csv.
+
+## DATA NOTE
+
+All included sample data are fictional and are provided only to demonstrate file structure and passage-flow accounting. They are unrelated to the empirical study and cannot reproduce the paper's results.
+  </info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point><point x="40" y="270"></point><point x="150" y="220"></point><point x="260" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines><line x="0.0" visible="true"><dash value="1.0"></dash><dash value="0.0"></dash></line></lines>
+      <indicator><shape name="link direction" rotatable="true" editableColorIndex="0"><line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line><line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line></shape></indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>setup repeat 30 [ go ]</previewCommands>
+  <experiments>
+    <experiment name="synthetic_passage_flow_run" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="100">
+      <setup>setup</setup>
+      <go>go</go>
+      <exitCondition>ticks &gt;= 100</exitCondition>
+      <metrics>
+        <metric>total-passage-flow</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="number-of-agents"><value value="30"></value></enumeratedValueSet>
+        <enumeratedValueSet variable="max-ticks"><value value="100"></value></enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
+</model>
+
