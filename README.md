@@ -8,13 +8,14 @@ The public release is intentionally minimal. It does not distribute restricted B
 
 | File | Purpose |
 | --- | --- |
-| `code/01_network_construction/merge_segments_into_strokes_self_best_fit_45_degrees.py` | Merges adjacent segments into strokes using a 45-degree self-best-fit rule. |
-| `code/01_network_construction/prepare_integrated_pedestrian_network_for_netlogo.py` | Converts a prepared pedestrian network into the input form required by NetLogo. |
+| `code/01_network_construction/merge_segments_into_strokes_self_best_fit_45_degrees.py` | Method script for 45-degree self-best-fit stroke merging; source inputs are not included. |
+| `code/01_network_construction/prepare_integrated_pedestrian_network_for_netlogo.py` | Method script for preparing NetLogo network input; source inputs are not included. |
 | `examples/` | A standalone synthetic NetLogo example and fictional input data demonstrating passage-flow counting. |
 | `data/anonymized_random_segment_passage_flow.csv` | Anonymized segment-level passage-flow values for the Random mechanism. |
 | `data/README.md` | Scope, fields, and restrictions for the anonymized Random flow file. |
 | `results/published_tables/` | Machine-readable versions of Tables 4-8 in the manuscript. |
 | `docs/DATA_AVAILABILITY.md` | Data availability statement. |
+| `docs/REPOSITORY_SCOPE.md` | Public materials, restrictions, and reproducibility scope. |
 | `docs/TABLE_ALIGNMENT.md` | Correspondence between repository CSV files and manuscript tables. |
 
 ## Passage flow
@@ -33,11 +34,9 @@ The executable NetLogo material is a synthetic example that documents the passag
 
 ## Requirements
 
-- Python 3.10 or later
-- Packages listed in `requirements.txt`
 - NetLogo 7.0.4
-- Java runtime distributed with NetLogo
-- Environment variable `NETLOGO_HOME` pointing to the NetLogo installation directory
+
+Python 3.10 or later and the packages in `requirements.txt` are required only to inspect or adapt the two network-construction method scripts. The synthetic NetLogo example is the executable workflow included in this repository.
 
 ## Running the synthetic example
 
@@ -59,9 +58,9 @@ The `results/published_tables/` directory reproduces the values displayed in the
 
 ## Data availability
 
-Outdoor road and path data are available from OpenStreetMap. Point-of-interest data were obtained through the Amap API, subject to its access conditions. Population inputs for the simulations were estimated from annual admissions announcements and staff information publicly available on the Shenzhen University website.
+Public synthetic code, anonymized Random passage-flow values, and published summary result tables are available from this repository. Outdoor road and path data are available from OpenStreetMap. Point-of-interest data were obtained through the Amap API, subject to its access conditions. Population inputs for the simulations were estimated from annual admissions announcements and staff information publicly available on the Shenzhen University website.
 
-The BIM/IFC building models and the integrated pedestrian network derived from them cannot be made publicly available because they contain institutionally restricted building information. Simulated passage-flow data supporting the analyses are available from the corresponding author upon reasonable request.
+The BIM/IFC building models and the integrated pedestrian network derived from them cannot be made publicly available because they contain institutionally restricted building information. The public Random flow file retains only newly assigned sequence identifiers and flow values; it does not include network geometry or other restricted attributes. Passage-flow data for the Purposive and Simulated mechanisms are available from the corresponding author upon reasonable request.
 
 ## Citation
 
