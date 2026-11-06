@@ -1,0 +1,9 @@
+segment_id,from_node,to_node,space_type
+s01,n01,n02,Indoor
+s02,n02,n03,Indoor
+s03,n03,n04,Indoor
+s04,n04,n05,Outdoor
+s05,n03,n06,Indoor
+s06,n03,n07,Indoor
+s07,n04,n08,Outdoor
+
