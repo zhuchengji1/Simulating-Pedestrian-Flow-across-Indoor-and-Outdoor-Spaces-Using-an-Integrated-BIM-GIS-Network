@@ -1,0 +1,169 @@
+; Synthetic teaching example for passage-flow counting.
+; All nodes, segments, OD routes and exported results are fictional.
+
+extensions [csv table]
+
+globals [
+  node-by-id
+  route-records
+]
+
+breed [nodes node]
+breed [people person]
+
+nodes-own [
+  node-id
+  node-space-type
+  place-label
+]
+
+links-own [
+  segment-id
+  segment-space-type
+  passage-flow
+]
+
+people-own [
+  agent-id
+  route-nodes
+  route-index
+  last-segment-id
+  global-passage-flow
+  indoor-passage-flow
+  outdoor-passage-flow
+]
+
+to setup
+  clear-all
+  random-seed 20261106
+  set node-by-id table:make
+  load-synthetic-nodes
+  load-synthetic-segments
+  load-synthetic-routes
+  create-synthetic-agents
+  reset-ticks
+end
+
+to go
+  ask people [ move-one-segment ]
+  update-link-display
+  tick
+  if ticks >= max-ticks [ stop ]
+end
+
+to load-synthetic-nodes
+  let rows but-first csv:from-file "../sample_data/synthetic_nodes.csv"
+  foreach rows [ row ->
+    create-nodes 1 [
+      set node-id item 0 row
+      setxy (item 1 row) (item 2 row)
+      set node-space-type item 3 row
+      set place-label item 4 row
+      set size 1.25
+      set color black
+      table:put node-by-id node-id self
+    ]
+  ]
+end
+
+to load-synthetic-segments
+  let rows but-first csv:from-file "../sample_data/synthetic_segments.csv"
+  foreach rows [ row ->
+    let from-node table:get node-by-id (item 1 row)
+    let to-node table:get node-by-id (item 2 row)
+    ask from-node [
+      create-link-with to-node [
+        set segment-id item 0 row
+        set segment-space-type item 3 row
+        set passage-flow 0
+        set color ifelse-value (segment-space-type = "Indoor") [gray] [sky]
+        set thickness 0.22
+      ]
+    ]
+  ]
+end
+
+to load-synthetic-routes
+  let rows but-first csv:from-file "../sample_data/synthetic_od_routes.csv"
+  set route-records map [ row ->
+    (list (item 0 row) (item 1 row) (read-from-string (item 2 row)))
+  ] rows
+end
+
+to create-synthetic-agents
+  create-people number-of-agents [
+    set agent-id who
+    set global-passage-flow 0
+    set indoor-passage-flow 0
+    set outdoor-passage-flow 0
+    set last-segment-id ""
+    set color red
+    set size 0.8
+    set-route-from-origin (item 0 one-of route-records)
+  ]
+end
+
+to set-route-from-origin [origin-id]
+  let candidates filter [ record -> item 0 record = origin-id ] route-records
+  if not any? candidates [ error (word "No sample route begins at " origin-id) ]
+  let selected one-of candidates
+  set route-nodes item 2 selected
+  set route-index 0
+  move-to (table:get node-by-id (first route-nodes))
+end
+
+to move-one-segment
+  if route-index >= (length route-nodes - 1) [
+    set-route-from-origin (last route-nodes)
+  ]
+
+  let current-node table:get node-by-id (item route-index route-nodes)
+  let next-node table:get node-by-id (item (route-index + 1) route-nodes)
+  let traversed-link [link-with next-node] of current-node
+  if traversed-link = nobody [
+    error (word "No segment connects " [node-id] of current-node " and " [node-id] of next-node)
+  ]
+
+  move-to next-node
+  let entered-segment-id [segment-id] of traversed-link
+  if entered-segment-id != last-segment-id [
+    ask traversed-link [ set passage-flow passage-flow + 1 ]
+    set global-passage-flow global-passage-flow + 1
+    if ([segment-space-type] of traversed-link = "Indoor") [
+      set indoor-passage-flow indoor-passage-flow + 1
+    ]
+    if ([segment-space-type] of traversed-link = "Outdoor") [
+      set outdoor-passage-flow outdoor-passage-flow + 1
+    ]
+    set last-segment-id entered-segment-id
+  ]
+  set route-index route-index + 1
+end
+
+to update-link-display
+  let maximum-flow max [passage-flow] of links
+  ask links [
+    set color scale-color red passage-flow 0 (maximum-flow + 1)
+    set thickness 0.15 + 0.04 * passage-flow
+  ]
+end
+
+to export-results
+  let segment-rows (list (list "segment_id" "space_type" "passage_flow"))
+  foreach sort links [ a-link ->
+    set segment-rows lput (list [segment-id] of a-link [segment-space-type] of a-link [passage-flow] of a-link) segment-rows
+  ]
+  csv:to-file "synthetic_segment_passage_flow.csv" segment-rows
+
+  let agent-rows (list (list "agent_id" "global_passage_flow" "indoor_passage_flow" "outdoor_passage_flow"))
+  foreach sort people [ a-person ->
+    set agent-rows lput (list [agent-id] of a-person [global-passage-flow] of a-person [indoor-passage-flow] of a-person [outdoor-passage-flow] of a-person) agent-rows
+  ]
+  csv:to-file "synthetic_agent_passage_flow.csv" agent-rows
+  user-message "Synthetic passage-flow results exported."
+end
+
+to-report total-passage-flow
+  report sum [passage-flow] of links
+end
+
