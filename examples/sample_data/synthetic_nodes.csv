@@ -1,0 +1,10 @@
+node_id,x,y,space_type,place_label
+n01,-6,0,Indoor,Entry
+n02,-3,0,Indoor,Hallway
+n03,0,0,Indoor,Atrium
+n04,3,0,Outdoor,Gateway
+n05,6,0,Outdoor,Path
+n06,0,3,Indoor,Classroom
+n07,0,-3,Indoor,Cafeteria
+n08,3,3,Outdoor,Library
+
