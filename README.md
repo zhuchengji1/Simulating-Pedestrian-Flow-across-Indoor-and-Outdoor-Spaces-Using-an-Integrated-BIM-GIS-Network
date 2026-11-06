@@ -1,6 +1,6 @@
 # Simulating Pedestrian Flow across Indoor and Outdoor Spaces Using an Integrated BIM-GIS Network
 
-This repository provides the public code and published summary results for the study **Simulating Pedestrian Flow across Indoor and Outdoor Spaces Using an Integrated BIM-GIS Network**. The study connects three-dimensional indoor circulation with two-dimensional outdoor paths, represents movement at segment and stroke scales, and records passage flow under alternative movement-demand mechanisms.
+This repository provides public synthetic code, anonymized Random passage-flow values, and published summary results for the study **Simulating Pedestrian Flow across Indoor and Outdoor Spaces Using an Integrated BIM-GIS Network**. The study connects three-dimensional indoor circulation with two-dimensional outdoor paths, represents movement at segment and stroke scales, and records passage flow under alternative movement-demand mechanisms.
 
 The public release is intentionally minimal. It documents the core workflow without distributing restricted BIM/IFC building information, the derived integrated network, activity sequences, or raw passage-flow records.
 
@@ -10,12 +10,11 @@ The public release is intentionally minimal. It documents the core workflow with
 | --- | --- |
 | `code/01_network_construction/merge_segments_into_strokes_self_best_fit_45_degrees.py` | Merges adjacent segments into strokes using a 45-degree self-best-fit rule. |
 | `code/01_network_construction/prepare_integrated_pedestrian_network_for_netlogo.py` | Converts a prepared pedestrian network into the input form required by NetLogo. |
-| `code/02_simulation/run_random_passage_flow_simulation_20000_ticks.py` | Runs the public Random mechanism for 20,000 ticks and validates the exported passage-flow totals. |
-| `code/02_simulation/models/random_movement_passage_flow_20000_ticks.nlogox3d` | NetLogo 3D model for the Random movement mechanism. |
 | `examples/` | A standalone synthetic NetLogo example and fictional input data demonstrating passage-flow counting. |
+| `data/anonymized_random_segment_passage_flow.csv` | Anonymized segment-level passage-flow values for the Random mechanism. |
+| `data/README.md` | Scope, fields, and restrictions for the anonymized Random flow file. |
 | `results/published_tables/` | Machine-readable versions of Tables 4-8 in the manuscript. |
 | `docs/DATA_AVAILABILITY.md` | Data availability statement. |
-| `docs/INPUT_REQUIREMENTS.md` | Requirements for the restricted input network. |
 | `docs/TABLE_ALIGNMENT.md` | Correspondence between repository CSV files and manuscript tables. |
 
 ## Passage flow
@@ -30,9 +29,7 @@ Accordingly, passage flow is the cumulative number of agent entries into each se
 
 ## Repository scope
 
-The public release contains only the **Random** model. The full study also implements Purposive and Simulated mechanisms, but their models and activity-sequence inputs are not included here. The public runner has therefore been configured to execute only the Random model.
-
-The published CSV tables are summary outputs. They contain no coordinates, original network identifiers, POI records, agent trajectories, raw structure metrics, or raw flow data.
+The executable NetLogo material is a synthetic example that documents the passage-flow counting procedure without reproducing the empirical network or the full study model. The anonymized Random flow file retains only non-spatial row identifiers and flow values. The published CSV tables are summary outputs. No public file contains coordinates, original network identifiers, POI records, agent trajectories, raw structure metrics, or BIM/IFC-derived attributes.
 
 ## Requirements
 
@@ -42,16 +39,9 @@ The published CSV tables are summary outputs. They contain no coordinates, origi
 - Java runtime distributed with NetLogo
 - Environment variable `NETLOGO_HOME` pointing to the NetLogo installation directory
 
-## Running the public Random workflow
+## Running the synthetic example
 
-The Random model requires a restricted network input named `SZU_network_0728_T_E_link_slim.csv`. Once approved access to this input has been obtained, place it in the location described in `docs/INPUT_REQUIREMENTS.md`, set `NETLOGO_HOME`, and run:
-
-```powershell
-$env:NETLOGO_HOME = "C:\\Path\\To\\NetLogo 7.0.4"
-python code/02_simulation/run_random_passage_flow_simulation_20000_ticks.py
-```
-
-The script runs the Random mechanism for 20,000 ticks and checks that the total agent passage flow equals the total segment passage flow.
+Open `examples/netlogo/passage_flow_sample.nlogox3d` in NetLogo 7, click `setup`, click `go`, and then click `export-results`. The model and its 3 by 3 by 3 lattice inputs are fully synthetic. See `examples/README.md` for details.
 
 ## Published summary results
 
