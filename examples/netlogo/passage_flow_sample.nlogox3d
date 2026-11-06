@@ -4,7 +4,7 @@
 __includes ["passage_flow_sample.nls"]
 ]]></code>
   <widgets>
-    <view3d wrappingAllowedZ="false" x="0" wrappingAllowedX="false" y="0" minPycor="-8" height="480" showTickCounter="true" patchSize="20.0" fontSize="10" wrappingAllowedY="false" width="650" tickCounterLabel="ticks" maxPycor="8" updateMode="0" frameRate="30.0" maxPzcor="8" maxPxcor="8" minPxcor="-8" minPzcor="-8"></view3d>
+    <view3d wrappingAllowedZ="false" x="0" wrappingAllowedX="false" y="0" minPycor="-8" height="480" showTickCounter="true" patchSize="20.0" fontSize="10" wrappingAllowedY="false" width="650" tickCounterLabel="ticks" maxPycor="8" updateMode="0" frameRate="30.0" maxPzcor="8" maxPxcor="8" minPxcor="-8" minPzcor="-1"></view3d>
     <button x="680" y="30" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="120">setup</button>
     <button x="680" y="85" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="120">go</button>
     <button x="680" y="140" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="120">export-results</button>
@@ -15,7 +15,7 @@ __includes ["passage_flow_sample.nls"]
   </widgets>
   <info>## WHAT IS IT?
 
-This is a small synthetic example of passage-flow counting. It contains eight fictional nodes, seven fictional segments and five illustrative origin-destination routes.
+This is a small synthetic example of passage-flow counting. It contains a three-dimensional 3 by 3 by 3 cubic lattice with 27 fictional nodes, 54 fictional segments and five illustrative origin-destination routes.
 
 ## HOW IT WORKS
 
