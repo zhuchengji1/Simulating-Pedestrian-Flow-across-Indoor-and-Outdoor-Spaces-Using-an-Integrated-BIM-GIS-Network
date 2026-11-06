@@ -2,7 +2,7 @@
 
 This repository provides public synthetic code, anonymized Random passage-flow values, and published summary results for the study **Simulating Pedestrian Flow across Indoor and Outdoor Spaces Using an Integrated BIM-GIS Network**. The study connects three-dimensional indoor circulation with two-dimensional outdoor paths, represents movement at segment and stroke scales, and records passage flow under alternative movement-demand mechanisms.
 
-The public release is intentionally minimal. It documents the core workflow without distributing restricted BIM/IFC building information, the derived integrated network, activity sequences, or raw passage-flow records.
+The public release is intentionally minimal. It does not distribute restricted BIM/IFC building information, the derived integrated network, activity sequences, or spatially identifiable passage-flow records. It provides only a non-spatial, anonymized Random passage-flow vector.
 
 ## What this repository contains
 
